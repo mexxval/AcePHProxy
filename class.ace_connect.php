@@ -26,10 +26,9 @@ class AceConnect {
 
 	protected function connect($key, $host, $port, $pid) {
 		$tmout = 1; // seconds
-		$conn = stream_socket_client(sprintf('tcp://%s:%d', $host, $port), &$errno, &$errstr, $tmout);
-		#$conn = fsockopen($host, $port, &$errno, &$errstr, $tmout);
+		$conn = @stream_socket_client(sprintf('tcp://%s:%d', $host, $port), &$errno, &$errstr, $tmout);
 		if (!$conn) {
-			throw new Exception('Cannot connect to AceServer. ' . $errstr);
+			throw new Exception('Cannot connect to AceServer. ' . $errstr, $errno);
 		}
 		# stream_set_blocking($conn, 0); // с этим херня полная
 		stream_set_timeout($conn, 1, 0);
@@ -52,7 +51,12 @@ class AceConnect {
 	}
 
 	public function stoppid($pid) {
-		$this->send($pid, 'STOP');
+		try {
+			$this->send($pid, 'STOP');
+		}
+		catch (Exception $e) {
+			error_log('Stop PID error: ' . $e->getMessage());
+		}
 		unset($this->conn[$pid]);
 	}
 
@@ -108,7 +112,7 @@ class AceConn {
 	}
 
 	public function send($string, $sec = 1, $usec = 0) {
-		fwrite($this->conn, $string . "\r\n");
+		@fwrite($this->conn, $string . "\r\n");
 		$line = $this->readsocket($sec, $usec, $this->dlstat);
 		return $line;
 	}
@@ -133,6 +137,21 @@ class AceConn {
 			}
 		}
 		return $line;
+	}
+
+	public function ping() {
+		// принцип - ставим небольшой таймаут, пробуем записать пустую строку (\r\n, 2 байта), 
+		// если запись прошла - стало быть сокет жив
+		stream_set_timeout($this->conn, 0, 50000);
+		$bytes = @fwrite($this->conn, "\r\n");
+		if (!$bytes) {
+			error_log('ping failed');
+			# $this->disconnect(); // решение примем уровнями выше
+			throw new Exception('ace_connection_broken');
+		}
+		else {
+			#error_log('ping success ' . var_export($ans, 1));
+		}
 	}
 
 	public function __destruct() {

@@ -17,6 +17,13 @@ class ClientPool {
 		return $this->clients;
 	}
 
+	public function notify() {
+		$args = func_get_args();
+		foreach ($this->getClients() as $one) {
+			call_user_func_array(array($one, 'notify'), $args);
+		}
+	}
+
 	public function track4new() {
 		$read = array($this->socket); // опрашиваем только мастер-сокет (сервер)
 		$mod_fd = stream_select($read, $_w = NULL, $_e = NULL, 0, 20000);
@@ -35,6 +42,9 @@ class ClientPool {
 			$newclients[$peer] = null;
 		}
 
+		// флаг необходимости срочно опросить сокеты еще раз
+		$recheck = false;
+
 		// теперь надо по всем клиентам пройти и спросить. нет ли у них на сокетах событий
 		foreach ($this->clients as $peer => $one) {
 			if ($one->isFinished()) {
@@ -44,6 +54,12 @@ class ClientPool {
 			}
 
 			try {
+				// тут такая логика: xbmc при открытии m3u по каждому элементу коннектится и
+				// спрашивает инфу, отдельно. а в главном цикле демона задержка около 30мс
+				// из-за нее плейлист из 10 строк открывается секунду.
+				// потому делаем так: если поймали исключение HEAD или empty-range - опрашиваем сокет еще
+				// но блин проблема в том, что на каждый эл-т плейлиста - отдельный коннект, так что
+				// компактненько тут не обойдешься... TODO
 				$result = $one->track4new();
 				if ($result) {
 					$result['client'] = $one;
@@ -57,10 +73,15 @@ class ClientPool {
 				unset($one);
 				unset($this->clients[$peer]);
 				$doneclients[$peer] = null;
+
+				if (in_array($e->getCode(), array(3, 4))) {
+					$recheck = true;
+				}
 			}
 		}
 
 		return array(
+			'recheck' => $recheck,
 			'new' => $newclients,
 			'done' => $doneclients,
 			'start' => $startreq

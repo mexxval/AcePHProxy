@@ -1,4 +1,15 @@
 <?php
+/**
+ * ТЕМА: читаем из ace максимально все что есть большими порциями и складываем в память.
+ * клиент подключается, выдаем ему содержимое, пока не подавится, но буфер не очищаем!!!
+ * когда клиент подавился, значит он записал только часть переданных ему данных, оставшееся сохранил себе
+ * пропускаем передачу ему данных, пока не запишет оставшееся в сокет
+ * у каждого клиента есть указатель на буфер в объекте потока, данные не копируются в каждом объекте клиента
+ * новый клиент, подключаясь, имеет указатель на хвост буфера и мы выдаем ему сколько он попросит, пока не подавится
+ * ^_^ KAWAIIIII
+ * профит: моментальный старт последующих клиентов, оптимизация по памяти, упразднение метода adjustBuffer, ...?
+ * TODO
+ */
 
 class StreamUnit {
 	const BUF_READ = 128000; // bytes
@@ -6,6 +17,7 @@ class StreamUnit {
 	const BUF_MAX = 512000;
 	const BUF_SECONDS = 30;
 	const BUF_DELTA_PRC = 5;
+	const RESTART_COUNT = 30;
 
 	protected $ace;
 	protected $resource;
@@ -16,6 +28,7 @@ class StreamUnit {
 	protected $cur_pid; // текущий id запущенной трансляции
 	protected $cur_name;// и название
 	protected $finished = false; // выставляется в true когда отключается последний клиент
+	protected $restarting = 0; // счетчик с обратным отсчетом, выставляется когда поток пытается перезапуститься
 	protected $FIFO = array(); // небольшой буфер в приложении
 
 	public function __construct(AceConnect $ace, $bufSize = null) {
@@ -24,7 +37,8 @@ class StreamUnit {
 		$this->init($bufSize);
 	}
 
-	public function start($pid, $name) {
+	// soe - stop on exception
+	public function start($pid, $name, $soe = true) {
 		try {
 			$this->cur_pid = $pid;
 			$this->cur_name = $name;
@@ -40,25 +54,24 @@ class StreamUnit {
 			$this->resource = $link_src;
 		}
 		catch (Exception $e) {
-			$this->close();
-			$this->finished = true;
+			$soe and $this->close();
 			throw $e;
 		}
 	}
 
 	public function __destruct() {
-#error_log('__destruct stream');
 	}
 
 	public function close() {
 		// вообще по идее при уничтожении объекта будут вызваны __destruct и всех вложенных
 		foreach ($this->clients as $idx => $one) {
-			#$one->close();
-			unset($this->clients[$idx]);
+			#$one->close(); // почему закомментировано закрытие клиентов?
+			unset($this->clients[$idx]); // может из-за unset?
 		}
 
 		is_resource($this->resource) and fclose($this->resource);
 		$this->ace->stoppid($this->cur_pid);
+		$this->finished = true;
 	}
 
 	public function unfinish() {
@@ -69,6 +82,10 @@ class StreamUnit {
 		return $this->finished;
 	}
 	
+	public function isRestarting() {
+		return $this->restarting > 0;
+	}
+
 	public function isActive() {
 		return is_resource($this->resource);
 	}
@@ -143,15 +160,70 @@ class StreamUnit {
 		}
 	}
 
+	protected function notify() {
+		$args = func_get_args();
+		foreach ($this->clients as $one) {
+			call_user_func_array(array($one, 'notify'), $args);
+		}
+	}
+	protected function restart() {
+		usleep(250000);
+		if ($this->restarting == 0) { // первая попытка
+			$this->notify('Ace connect broken. Restarting', 'warning');
+			// закрываем поток видео и коннект к ace, но оставляем всех клиентов активными. потом запускаем заново
+			is_resource($this->resource) and fclose($this->resource);
+			$this->ace->stoppid($this->cur_pid);
+			$this->restarting = self::RESTART_COUNT;
+		}
+
+		// очень плохое решение. ace перезапускается не сразу, сек через 5. делаем N попыток с интервалом в секунду
+		// а остальное приложение все это время ждет.. gui не обновляется
+		$pid = $this->cur_pid;
+		$name = $this->cur_name;
+		try {
+			$res = $this->start($pid, $name, false);
+			$this->restarting = 0;
+			return $res;
+		}
+		catch (Exception $e) {
+			if (strpos($e->getMessage(), 'Cannot connect') === false) {
+				$this->restarting = 0;
+				throw $e; // не наш случай. мы ждем ошибки коннекта
+			}
+		}
+		$this->restarting--;
+
+		if ($this->restarting == 0) { // так и не дождались
+			error_log('Ace Server not reachable');
+			throw $e;
+		}
+	}
+
 	// читаем часть трансляции и раздаем зарегенным клиентам
 	// вызывается около 33 раз в сек, зависит от usleep в главном цикле
+	// наверное где то тут надо отслеживать коннект ace и рестартить поток в случае падения
 	public function copyChunk() {
 		if (!$this->resource) {
 			return false;
 		}
 
-		$conn = $this->ace->getConnection($this->cur_pid);
-		$conn->readsocket(0, 20000, $dlstat); // читаем лог понемногу, сигналы сервера можно отслеживать
+		try {
+			$conn = $this->ace->getConnection($this->cur_pid);
+			// пока не нашел, как сразу получить событие о разрыве канала
+			if (!$conn->readsocket(0, 20000, $dlstat)) { // читаем лог понемногу, сигналы сервера можно отслеживать
+				$conn->ping();
+			}
+		}
+		catch (Exception $e) {
+			$msg = $e->getMessage();
+			if ($msg == 'ace_connection_broken' or strpos($msg, 'Cannot connect') !== false) {
+				// ace бывает падает, надо попробовать перезапустить
+				// если не получится, будет исключение и поток остановится
+				$this->restart();
+				return;
+			}
+		}
+
 		// копируем контент в сокет
 		$data = fread($this->resource, $this->bufferSize); // TODO small timeout
 
@@ -174,7 +246,6 @@ class StreamUnit {
 		// из последнего FIFO, как пойдет чтение - снова большими кусками будем кормить клиента
 		// на выходе имеем данные из FIFO, вся логика в методе
 		$buffer = $this->adjustBuffer($data);
-#error_log('fifo ' . count($this->FIFO) . ', buf=' . strlen($buffer) . ', data=' . strlen($data));
 
 		$this->statistics = array_merge($this->statistics, $this->buf_adjusted);
 		if ($dlstat) {
@@ -292,7 +363,7 @@ class StreamUnit {
 			$buffer = array_pop($this->FIFO);
 		}
 		else {
-			$buffer = $this->getPartOfFIFO(500); // 5 bytes
+			$buffer = $this->getPartOfFIFO(5); // 5 bytes
 		}
 		return $buffer;
 	}
@@ -311,7 +382,6 @@ class StreamUnit {
 			array_push($this->FIFO, substr($tmp, $bytes));
 		}
 
-		#error_log('FIFO ' . count($this->FIFO) . ' items, last len=' . strlen(end($this->FIFO)));
 		return $buffer;
 	}
 }

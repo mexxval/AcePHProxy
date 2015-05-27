@@ -1,17 +1,31 @@
 <?php
 
 class EventController {
+	const CLR_SPEC1 = 4;
 	const CLR_YELLOW = 3;
 	const CLR_GREEN = 2;
 	const CLR_ERROR = 1;
 	const CLR_DEFAULT = 7;
 
 	protected $windows = array();
-	protected $www_ok;
+	protected $www_ok = true;
 	protected $cur_x;
 	protected $cur_y;
+	protected $map;
 
 	public function __construct() {
+		$col = 0;
+		// конфиг раскладки по колонкам
+		$this->map = array(
+			0 => $col += 2, // channel
+			$col += 24, // Buffer, but 25 is Channel width!
+			$col += 7,	// State
+			$col += 9,	// up/down bytes
+			$col += 17,	// peers
+			$col += 6,	// Client list
+			$col += 24,	// download/upload speed
+			$col += 8
+		);
 	}
 
 	public function __destruct() {
@@ -44,10 +58,11 @@ class EventController {
 
 		if (ncurses_has_colors()) {
 			ncurses_start_color();
+			// colors http://php.net/manual/en/ncurses.colorconsts.php
 			ncurses_init_pair(self::CLR_ERROR, NCURSES_COLOR_RED, NCURSES_COLOR_BLACK);
 			ncurses_init_pair(self::CLR_GREEN, NCURSES_COLOR_GREEN, NCURSES_COLOR_BLACK);
 			ncurses_init_pair(self::CLR_YELLOW, NCURSES_COLOR_YELLOW, NCURSES_COLOR_BLACK);
-			ncurses_init_pair(4, NCURSES_COLOR_BLUE, NCURSES_COLOR_BLACK);
+			ncurses_init_pair(self::CLR_SPEC1, NCURSES_COLOR_RED, NCURSES_COLOR_WHITE);
 			ncurses_init_pair(5, NCURSES_COLOR_MAGENTA, NCURSES_COLOR_BLACK);
 			ncurses_init_pair(6, NCURSES_COLOR_CYAN, NCURSES_COLOR_BLACK);
 			ncurses_init_pair(self::CLR_DEFAULT, NCURSES_COLOR_WHITE, NCURSES_COLOR_BLACK);
@@ -89,18 +104,8 @@ class EventController {
 
 		$this->listen4resize();
 
-		$i = 1; $col = 0;
-		// конфиг раскладки по колонкам
-		$map = array(
-			0 => $col += 2, // channel
-			$col += 24, // Buffer, but 25 is Channel width!
-			$col += 8,	// State
-			$col += 9,	// up/down bytes
-			$col += 17,	// peers
-			$col += 6,	// Client list
-			$col += 24,	// download/upload speed
-			$col += 8
-		);
+		$i = 1;
+		$map = $this->map;
 
 		// выводим все коннекты и трансляции
 		$this->output('stat', $i, $map[0], "Channel");
@@ -151,9 +156,14 @@ class EventController {
 
 	// а еще чтобы не долбить коннектами, можно его куда нить открыть и держать. 
 	// опыт xbmc клиента правда говорит, что это мб весьма ненадежно.. зато реалтайм
-	public function checkWWW() {
-		$fp = fsockopen('8.8.8.8', 53, $errstr, $errno, 1);
+	public function checkWWW(&$changed) {
+		// делаем 2-3 попытки коннекта для проверки инета
+		$cyc = 3;
+		while (!($fp = @stream_socket_client('tcp://8.8.8.8:53', $e, $e, 0.15, STREAM_CLIENT_CONNECT)) and $cyc-- > 0);
+
+		$tmp = $this->www_ok; // для определения смены состояния
 		$this->www_ok = $fp ? true : false;
+		$changed = $tmp != $this->www_ok;
 		$fp and fclose($fp);
 		return $this->www_ok;
 	}

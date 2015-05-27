@@ -66,6 +66,7 @@ class StreamsManager {
 			}
 			// tmp использовалась, чтобы pid не попортить раньше времени
 			$pid = $tmp;
+			$this->log('Got PID ' . $pid);
 		}
 		else {
 			$this->log('Request channel ' . $name);
@@ -76,7 +77,7 @@ class StreamsManager {
 			$bufSize = isset($this->buffers[$pid]) ? $this->buffers[$pid] : null;
 			$this->streams[$pid] = new StreamUnit($this->ace, $bufSize);
 			try {
-				$this->log('Start new PID ' . $pid);
+				#$this->log('Start new PID ' . $pid);
 				$this->streams[$pid]->start($pid, $name);
 			}
 			catch (Exception $e) {
@@ -88,7 +89,7 @@ class StreamsManager {
 			}
 		}
 		else { // уже есть и запущено
-			$this->log('Existing PID ' . $pid);
+			#$this->log('Existing PID ' . $pid);
 			$this->streams[$pid]->unfinish();
 		}
 		// если мы тут, значит поток либо успешно создан, либо уже был создан ранее
@@ -105,8 +106,16 @@ class StreamsManager {
 	public function copyContents() {
 		// по каждой активной трансляции читаем контент и раскидываем его по ассоциированным клиентам
 		// по каждому ace-коннекту читаем его лог, чтобы буфер не заполнял, да и полезно бывает
-		foreach ($this->streams as $one) {
-			$one->copyChunk();
+		foreach ($this->streams as $pid => $one) {
+			try {
+				$one->copyChunk();
+			}
+			catch (Exception $e) {
+				error_log('StrMgr [E] ' . $e->getMessage());
+				#if ($e->getMessage() == 'ace_connection_broken') {
+					$this->closeStream($pid);
+				#}
+			}
 		}
 		unset($one);
 	}
@@ -121,7 +130,7 @@ class StreamsManager {
 			CURLOPT_RETURNTRANSFER => true,
 			CURLOPT_FOLLOWLOCATION => true,
 			CURLOPT_POST           => 1,
-			CURLOPT_POSTFIELDS     => 'email=<emaaail))>&password=<paroooole>&enter=Войти',
+			CURLOPT_POSTFIELDS     => 'email=mechanics@inbox.ru&password=feh6ba4s&enter=Войти',
 			CURLOPT_COOKIEFILE => './cookie_ttv.txt',
 			CURLOPT_COOKIEJAR =>  './cookie_ttv.txt',
 		));
@@ -132,7 +141,6 @@ class StreamsManager {
 		return true;
 	}
 	protected function parse4PID($trid) {
-		$this->log('Searching PID');
 		// base init
 		$curl = curl_init();
 		$url = "http://torrent-tv.ru/torrent-online.php?translation=" . $trid;
@@ -150,7 +158,6 @@ class StreamsManager {
 			throw new Exception('loadPlayer+PID not matched. ' . ($isLoggedIn ? 'Is' : 'Not') . ' logged in');
 		}
 
-		$this->log('Got PID ' . $m[1]);
 		return $m[1];
 	}
 

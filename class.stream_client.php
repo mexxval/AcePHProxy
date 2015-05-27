@@ -22,6 +22,10 @@ class StreamClient {
 		return count($this->buffer);
 	}
 
+	public function getIp() {
+		return implode('', array_slice(explode(':', $this->peer), 0, 1));
+	}
+
 	public function getName() {
 		return $this->peer;
 	}
@@ -55,10 +59,11 @@ class StreamClient {
 			$this->buffer[] = $data;
 		}
 		// будем кикать тех, у кого буфер слишком вырос. не знаю как еще опрделить, что клиент мертв
-		if (count($this->buffer) > 300) {
+		// TODO проблема в том, что на клиенте это держать дороже - сколько клиентов, столько копий буферов в памяти
+		if (count($this->buffer) > 500) {
 			// 300 буферов HD дискавери это около 45Mb
-			error_log('buffer kickban ' . $this->getName());
-			return $this->close();
+			$this->close();
+			throw new Exception('buffer kickban ' . $this->getName());
 		}
 
 		// пробуем использовать stream_select()
@@ -109,6 +114,14 @@ class StreamClient {
 		// будем считать число ошибок записи в сокет подряд (при успешной записи счетчик в 0)
 		// по достижении порога ошибок - кикаем сами себя
 
+#if ($res != strlen($data) or $match) {
+#	error_log($res . ' of ' . strlen($data) . ' bytes with ' . $err['message']);
+	// если запись не удалась (только для fwrite), или записалось не все - кладем разницу в буфер
+	// в след.подход попробуем еще раз
+	// $res байт записалось, сохраняем часть с res и до конца
+#	$this->buffer[] = substr($data, $res);
+#}
+
 		return $b;
 	}
 	protected function checkForWriteError() {
@@ -124,8 +137,8 @@ class StreamClient {
 		}
 
 		if ($this->err_counter > self::BUF_WRITE_ERR_MAXCOUNT) {
-			error_log('error kickban ' . $this->getName());
 			$this->close();
+			throw new Exception('error kickban ' . $this->getName());
 		}
 	}
 
@@ -148,27 +161,95 @@ class StreamClient {
 		}
 
 		// в этой ветке можем читать запрос клиента на запуск канала
-		// http://localhost:8000/pid/43b12325cd848b7513c42bd265a62e89f635ab08/Russia24
+		// http://sci-smart.ru:8000/pid/43b12325cd848b7513c42bd265a62e89f635ab08/Russia24
 		// закрывать коннект не надо
 		// error_log(date('H:i:s') . " Client sent: " . $sock_data);
+
+		// РЕФАКТОРИТЬ! эта часть должна быть представлена каким-то объектом-обработчиком запросов
 		if (preg_match('~^HEAD.*HTTP~smU', $sock_data, $m)) {
 			throw new Exception('HEAD request not supported', 3);
 		}
 		else if (preg_match('~Range: bytes=0\-0~smU', $sock_data, $m)) {
-			throw new Exception('Skip empty range request');
+			throw new Exception('Skip empty range request', 4);
 		}
 
 		// start by PID
 		if (preg_match('~GET\s/pid/([^/]*)/(.*)\sHTTP~smU', $sock_data, $m)) {
 			$pid = $m[1];
-			return array('pid' => $pid, 'name' => $m[2], 'type' => 'pid');
+			$name = urldecode($m[2]);
+			return array('pid' => $pid, 'name' => $name, 'type' => 'pid');
 		}
 		// start by translation ID (http://torrent-tv.ru/torrent-online.php?translation=?)
 		else if (preg_match('~GET\s/trid/(\d+)/(.*)\sHTTP~smU', $sock_data, $m)) {
 			$id = $m[1];
-			return array('pid' => $id, 'name' => $m[2], 'type' => 'trid');
+			$name = urldecode($m[2]);
+			return array('pid' => $id, 'name' => $name, 'type' => 'trid');
 		}
 		// start by channel name (how?)
+		// {}
+		// response with m3u tv playlist
+		else if (preg_match('~GET\s/playlist~smU', $sock_data, $m)) {
+			$headers = 
+				'HTTP/1.0 200 OK' . "\r\n" . 
+				'Content-type: text/plain' . "\r\n" . 
+				'Connection: close' . "\r\n\r\n";
+			$this->put($headers);
+
+			$this->put('#EXTM3U
+#EXTINF:-1,2x2
+http://sci-smart.ru:8000/pid/0d2137fc5d44fa9283b6820973f4c0e017898a09/2x2
+#EXTINF:-1,24 Техно
+http://sci-smart.ru:8000/pid/11e61b71cf55801a7e5c23671006caa379fc1e35/24 Техно
+');
+		}
+		// выдать HTML-страницу, аналогичную содержанию ncurses-ui
+		else if (preg_match('~GET\s/\sHTTP~smU', $sock_data, $m)) {
+		}
+
+		// если запрос неясен - закрываем коннект
+		// по идее клиент после запроса потока больше ничего не шлет
+		$this->close();
+	}
+
+	// новая фича, пробуем уведомить XBMC-клиента об ошибке (popup уведомление)
+	// работает! :)
+	// notify all уведомляет всех клиентов, хз чем фича мб полезна
+	//	{"id":2,"jsonrpc":"2.0","method":"JSONRPC.NotifyAll","params":{"sender":"me","message":"he","data":"testdata"}}
+	//  тут же получаю уведомление 
+	//	{"jsonrpc":"2.0","method":"Other.he","params":{"data":"testdata","sender":"me"}}
+	//  и отчет о выполнении команды {"id":2,"jsonrpc":"2.0","result":"OK"}
+	public function notify($note, $type = 'info') {
+		$ip = $this->getIp();
+		error_log('NOTE on ' . $ip . ':' . $note);
+
+		$conn = @stream_socket_client('tcp://' . $ip . ':9090', $e, $e, 0.01, STREAM_CLIENT_CONNECT);
+		if ($conn) {
+			switch ($type) {
+				case 'info':
+					$dtime = 1500;
+					break;
+				case 'warning':
+					$dtime = 3000;
+					break;
+				default:
+					$dtime = 4000;
+			}
+
+			$json = array(
+					'jsonrpc' => '2.0',
+					'id' => 1,
+					'method' => 'GUI.ShowNotification',
+					'params' => array(
+						'title' => 'AcePHP ' . $type,
+						'message' => $note,
+						'image' => 'http://kodi.wiki/images/c/c9/Logo.png',
+						'displaytime' => $dtime
+					)
+			);
+			$json = json_encode($json);
+			$res = @stream_socket_sendto($conn, $json);
+			fclose($conn);
+		}
 	}
 
 	public function close() {
@@ -183,7 +264,6 @@ class StreamClient {
 	}
 
 	public function __destruct() {
-#error_log('__destruct client ');
 	}
 }
 
