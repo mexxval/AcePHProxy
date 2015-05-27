@@ -7,16 +7,25 @@ class StreamsManager {
 	protected $ace;
 	protected $pool;
 	protected $setup_file;
+	protected $ttv_login;
+	protected $ttv_psw;
 	protected $closeStreams = array(); // закрывать будем не сразу, а через время (10sec). pid => puttime
 
 	public function __construct(AceConnect $ace, ClientPool $pool) {
 		$this->ace = $ace;
 		$this->pool = $pool;
 		$this->setup_file = dirname(__FILE__) . '/.acePHProxy.settings';
-		$this->buffers = json_decode(file_get_contents($this->setup_file), true);
+		$tmp = json_decode(file_get_contents($this->setup_file), true);
+		$this->buffers = $tmp['buffers'];
+		$this->ttv_login = $tmp['ttv_login'];
+		$this->ttv_psw = $tmp['ttv_psw'];
 	}
 	public function __destruct() {
-		file_put_contents($this->setup_file, json_encode($this->buffers));
+		file_put_contents($this->setup_file, json_encode(array(
+			'buffers' => $this->buffers,
+			'ttv_login' => $this->ttv_login,
+			'ttv_psw' => $this->ttv_psw,
+		)));
 	}
 
 	public function getStreams() {
@@ -130,7 +139,7 @@ class StreamsManager {
 			CURLOPT_RETURNTRANSFER => true,
 			CURLOPT_FOLLOWLOCATION => true,
 			CURLOPT_POST           => 1,
-			CURLOPT_POSTFIELDS     => 'email=<eml>&password=<psw>&enter=Войти',
+			CURLOPT_POSTFIELDS     => 'email=' . $this->ttv_login . '&password=' . $this->ttv_psw . '&enter=Войти',
 			CURLOPT_COOKIEFILE => './cookie_ttv.txt',
 			CURLOPT_COOKIEJAR =>  './cookie_ttv.txt',
 		));
