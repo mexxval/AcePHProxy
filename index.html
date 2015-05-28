@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="UTF-8">
+    <title>AcePHProxy by mexxval</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" type="text/css" href="stylesheets/normalize.css" media="screen">
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,700' rel='stylesheet' type='text/css'>
+    <link rel="stylesheet" type="text/css" href="stylesheets/stylesheet.css" media="screen">
+    <link rel="stylesheet" type="text/css" href="stylesheets/github-light.css" media="screen">
+  </head>
+  <body>
+    <section class="page-header">
+      <h1 class="project-name">AcePHProxy</h1>
+      <h2 class="project-tagline">PHP-прокси демон для Ace Stream. Позволяет смотреть торрент-ТВ на любом устройстве</h2>
+      <a href="https://github.com/mexxval/AcePHProxy" class="btn">View on GitHub</a>
+      <a href="https://github.com/mexxval/AcePHProxy/zipball/master" class="btn">Download .zip</a>
+      <a href="https://github.com/mexxval/AcePHProxy/tarball/master" class="btn">Download .tar.gz</a>
+    </section>
+
+    <section class="main-content">
+      <h1>
+<a id="О-проекте" class="anchor" href="#%D0%9E-%D0%BF%D1%80%D0%BE%D0%B5%D0%BA%D1%82%D0%B5" aria-hidden="true"><span class="octicon octicon-link"></span></a>О проекте</h1>
+
+<p>Попробовав однажды <a href="https://github.com/ValdikSS/aceproxy">AceProxy</a> от автора <a href="https://github.com/ValdikSS" class="user-mention">@ValdikSS</a>, я решил написать "такой же, но без крыльев". Плеер использовал XBMC, и было с ним ряд неудобств. А именно: </p>
+
+<ol>
+<li>долгое время старта трансляции</li>
+<li>долгое открытие m3u листа с каналами (чем их больше, тем дольше ждать)</li>
+<li>очень долго ждать реакции при зависании/обрыве потока</li>
+</ol>
+
+<p>и немного по самому софту</p>
+
+<ol>
+<li>требует VLC для просмотра одного канала на нескольких устройствах одновременно</li>
+<li>работал очень нестабильно, особенно в режиме с VLC. Это по сути и стало толчком</li>
+</ol>
+
+<p>Долгое время старта (при открытии трансляции затык на 4 сек), а также крайне долгое открытие плейлиста всего из 10 ссылок, оказалось следствием двух дополнительных запросов от XBMC: один HEAD-запрос ссылки, другой с заголовком Range: 0-0.
+И так на каждую ссылку, с ожиданием ответа по 2 сек. Доставало неимоверно.
+А поскольку тормозящий софт я страсть как не люблю, то решил..</p>
+
+<h1>
+<a id="Напишу-свой-ace-proxy-с-ui-и-плюшками" class="anchor" href="#%D0%9D%D0%B0%D0%BF%D0%B8%D1%88%D1%83-%D1%81%D0%B2%D0%BE%D0%B9-ace-proxy-%D1%81-ui-%D0%B8-%D0%BF%D0%BB%D1%8E%D1%88%D0%BA%D0%B0%D0%BC%D0%B8" aria-hidden="true"><span class="octicon octicon-link"></span></a>Напишу свой Ace Proxy, с UI и плюшками</h1>
+
+<p>Сказано - сделано.
+На PHP (о ужас!) был написан демон, при старте он открывает порт для клиентов и коннект до AceStream.</p>
+
+<h3>
+<a id="Многопользовательский-режим" class="anchor" href="#%D0%9C%D0%BD%D0%BE%D0%B3%D0%BE%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B8%D0%B9-%D1%80%D0%B5%D0%B6%D0%B8%D0%BC" aria-hidden="true"><span class="octicon octicon-link"></span></a>Многопользовательский режим</h3>
+
+<p>Клиенты обращаются к демону по ссылке вида <a href="http://10.0.0.1:8000/pid/09fdc09e780fe62fb8187bf74ae2c05c3ebcc90e/2x2">http://10.0.0.1:8000/pid/09fdc09e780fe62fb8187bf74ae2c05c3ebcc90e/2x2</a>
+Демон обращается к AceStream, запускает полученный PID, дожидается ссылки на поток от Ace и открывает ее, ассоциирует клиента с потоком и начинает перекачивать данные из потока на клиент. Если подключится еще один клиент с таким же PID, то поток будет копироваться уже на 2 клиента, или на 3, 4, 10..</p>
+
+<h3>
+<a id="Адаптивная-подстройка-буфера" class="anchor" href="#%D0%90%D0%B4%D0%B0%D0%BF%D1%82%D0%B8%D0%B2%D0%BD%D0%B0%D1%8F-%D0%BF%D0%BE%D0%B4%D1%81%D1%82%D1%80%D0%BE%D0%B9%D0%BA%D0%B0-%D0%B1%D1%83%D1%84%D0%B5%D1%80%D0%B0" aria-hidden="true"><span class="octicon octicon-link"></span></a>Адаптивная подстройка буфера</h3>
+
+<p>Размер куска (буфера), читаемого из Ace, определяется для каждого потока, корректируется непрерывно и хранится в настройках. Это позволило быстро стартовать трансляцию, быстро запускать ее на каждом новом клиенте, устранить начальную буферизацию. Но нужно не забыть запустить acestreamengine с правильными параметрами</p>
+
+<h3>
+<a id="ncurses-ui" class="anchor" href="#ncurses-ui" aria-hidden="true"><span class="octicon octicon-link"></span></a>Ncurses-UI</h3>
+
+<p>Тут особенно рассказывать нечего, демоны обычно запускаются в консоли и либо молчат, либо "срут в логи". Мне же хотелось наблюдать картину со списком клиентов, трансляций, отдельным окном логов, какими-нибудь строками состояния, да еще и в цвете, мало того - обновляющееся realtime. Реализовал все это на ncurses.</p>
+
+<h3>
+<a id="xbmc-уведомления" class="anchor" href="#xbmc-%D1%83%D0%B2%D0%B5%D0%B4%D0%BE%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D1%8F" aria-hidden="true"><span class="octicon octicon-link"></span></a>XBMC-уведомления</h3>
+
+<p>Иногда трансляция не открывается по какой-то причине, иногда она ломается и не запускается больше, иногда пропадает интернет, и во всех этих случаях мне приходилось лезть в консоль и смотреть что случилось.
+Я решил реализовать всплывающие уведомления на XBMC узлы (требуется включить в настройках XBMC управление извне), теперь если падает интернет, или демон делает попытку перезапустить трансляцию, потому что Ace рухнул, я получаю всплывающее уведомление об этом на экране.</p>
+
+<h1>
+<a id="Что-получилось" class="anchor" href="#%D0%A7%D1%82%D0%BE-%D0%BF%D0%BE%D0%BB%D1%83%D1%87%D0%B8%D0%BB%D0%BE%D1%81%D1%8C" aria-hidden="true"><span class="octicon octicon-link"></span></a>Что получилось</h1>
+
+<p>Немного картинок</p>
+
+<p>Уведомление об ошибке запуска Travel HD. Ace не предоставил ссылку на поток
+<img src="https://drive.google.com/file/d/0B610P3FMdTo6SDA3VXIzYWpnMEk/view?usp=sharing" alt="Stream start error notification"></p>
+
+<p>Демонстрация ncurses-ui. 3 клиента на поток 2х2, ошибка запуска другой трансляции
+<img src="https://drive.google.com/file/d/0B610P3FMdTo6TUVrU0ZFMFctMWM/view?usp=sharing" alt="UI"></p>
+
+<p>Перезапуск потока, я убил Ace Server (тот поднимается через 3 сек сам)
+<img src="https://drive.google.com/file/d/0B610P3FMdTo6Q3JXYm5oSXZacVU/view?usp=sharing" alt="Stream restart"></p>
+
+      <footer class="site-footer">
+        <span class="site-footer-owner"><a href="https://github.com/mexxval/AcePHProxy">AcePHProxy</a> is maintained by <a href="https://github.com/mexxval">mexxval</a>.</span>
+
+        <span class="site-footer-credits">This page was generated by <a href="https://pages.github.com">GitHub Pages</a> using the <a href="https://github.com/jasonlong/cayman-theme">Cayman theme</a> by <a href="https://twitter.com/jasonlong">Jason Long</a>.</span>
+      </footer>
+
+    </section>
+
+  
+  </body>
+</html>
+
