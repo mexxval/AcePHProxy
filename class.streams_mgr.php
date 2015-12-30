@@ -1,14 +1,14 @@
 <?php
-
 class StreamsManager {
 	const KEEPALIVE_TIME = 3; // sec
 
-	protected $streams = array(); // pid => clients
+	protected $streams = array(); // pid => StreamUnit
 	protected $ace;
 	protected $pool;
 	protected $setup_file;
 	protected $ttv_login;
 	protected $ttv_psw;
+	protected $buffers = array();
 	protected $closeStreams = array(); // закрывать будем не сразу, а через время (10sec). pid => puttime
 
 	public function __construct(AceConnect $ace, ClientPool $pool) {
@@ -37,7 +37,7 @@ class StreamsManager {
 		global $EVENTS;
 
 		$args = func_get_args();
-		call_user_func_array(array($EVENTS, 'log'), $args);
+		$EVENTS and call_user_func_array(array($EVENTS, 'log'), $args);
 	}
 
 	// xbmc странно делает, при зависании закрывает коннект и открывает новый с offset-ом, 
@@ -53,7 +53,7 @@ class StreamsManager {
 		}
 		$name = $this->streams[$pid]->getName();
 		// обновим значение буфера
-		$this->buffers[$pid] = $this->streams[$pid]->getBuffer();
+		$this->buffers[$pid] = $this->streams[$pid]->getBufferSize();
 		$this->streams[$pid]->close();
 		unset($this->streams[$pid]);
 		$this->log('Closed stream ' . $name);
@@ -63,35 +63,28 @@ class StreamsManager {
 		return isset($this->streams[$pid]);
 	}
 
+	// с какого то хера старт канала идет двумя последовательными запросами
+	// Request translation Карусель (410)
+	// Got PID  ...
+	// Prepare to stop Карусель
+	// Request translation Карусель (410)
+	// Got PID ...
+	// и только потом играет
 	public function start($pid, $name, $type = 'pid') {
-		if ($type == 'trid') { // pid в этом случае это trid, надо найти pid на сайте
-			$this->log('Request translation ' . $name . ' (' . $pid . ')');
-			try {
-				$tmp = $this->parse4PID($pid);
-			}
-			catch (Exception $e) {
-				$this->torrentAuth();
-				$tmp = $this->parse4PID($pid);
-			}
-			// tmp использовалась, чтобы pid не попортить раньше времени
-			$pid = $tmp;
-			$this->log('Got PID ' . $pid);
-		}
-		else {
-			$this->log('Request channel ' . $name);
-		}
-
+		$streamid = $pid;
 		// если трансляции нет, создаем экземпляр, оно запустит коннект ace и сам pid
-		if (!isset($this->streams[$pid])) {
-			$bufSize = isset($this->buffers[$pid]) ? $this->buffers[$pid] : null;
-			$this->streams[$pid] = new StreamUnit($this->ace, $bufSize);
+		if (!isset($this->streams[$streamid])) {
+			$bufSize = isset($this->buffers[$streamid]) ? $this->buffers[$streamid] : null;
+			$this->streams[$streamid] = new StreamUnit($this->ace, $bufSize, $type);
+			$this->streams[$streamid]->setTTVCredentials($this->ttv_login, $this->ttv_psw);
 			try {
 				#$this->log('Start new PID ' . $pid);
-				$this->streams[$pid]->start($pid, $name);
+				$this->streams[$streamid]->start($pid, $name);
 			}
 			catch (Exception $e) {
-				$this->streams[$pid]->close();
-				unset($this->streams[$pid]);
+				// через closeStream может?
+				$this->streams[$streamid]->close();
+				unset($this->streams[$streamid]);
 				// closeStream ?
 				$this->log($e->getMessage(), EventController::CLR_ERROR);
 				throw $e;
@@ -99,16 +92,16 @@ class StreamsManager {
 		}
 		else { // уже есть и запущено
 			#$this->log('Existing PID ' . $pid);
-			$this->streams[$pid]->unfinish();
+			$this->streams[$streamid]->unfinish();
 		}
 		// если мы тут, значит поток либо успешно создан, либо уже был создан ранее
 
 		// удалим из очереди на закрытие
-		if (isset($this->closeStreams[$pid])) {
-			unset($this->closeStreams[$pid]);
+		if (isset($this->closeStreams[$streamid])) {
+			$this->log('Cancel stop ' . $this->streams[$streamid]->getName());
+			unset($this->closeStreams[$streamid]);
 		}
-		// $this->streams[$pid]->registerClient($client);
-		return $this->streams[$pid];
+		return $this->streams[$streamid];
 	}
 
 	// вызывается около 33 раз в сек, зависит от usleep в главном цикле
@@ -126,48 +119,7 @@ class StreamsManager {
 				#}
 			}
 		}
-		unset($one);
-	}
-
-	protected function torrentAuth() {
-		$this->log('Authorizing on torrent');
-		// base init
-		$curl = curl_init();
-		$url = "http://torrent-tv.ru/auth.php";
-		curl_setopt_array($curl, array(
-			CURLOPT_URL => $url,
-			CURLOPT_RETURNTRANSFER => true,
-			CURLOPT_FOLLOWLOCATION => true,
-			CURLOPT_POST           => 1,
-			CURLOPT_POSTFIELDS     => 'email=' . $this->ttv_login . '&password=' . $this->ttv_psw . '&enter=Войти',
-			CURLOPT_COOKIEFILE => './cookie_ttv.txt',
-			CURLOPT_COOKIEJAR =>  './cookie_ttv.txt',
-		));
-		$res = curl_exec($curl);
-		if (strpos($res, 'cabinet.php') === false) {
-			throw new Exception('Login failed');
-		}
-		return true;
-	}
-	protected function parse4PID($trid) {
-		// base init
-		$curl = curl_init();
-		$url = "http://torrent-tv.ru/torrent-online.php?translation=" . $trid;
-		curl_setopt_array($curl, array(
-			CURLOPT_URL => $url,
-			CURLOPT_RETURNTRANSFER => true,
-			CURLOPT_FOLLOWLOCATION => true,
-			CURLOPT_COOKIEFILE => './cookie_ttv.txt',
-			CURLOPT_COOKIEJAR =>  './cookie_ttv.txt',
-		));
-
-		$res = curl_exec($curl);
-		$isLoggedIn = preg_match('~Мой кабинет~', $res);
-		if (!preg_match('~loadPlayer\("([a-f0-9]{40})"~smU', $res, $m)) {
-			throw new Exception('loadPlayer+PID not matched. ' . ($isLoggedIn ? 'Is' : 'Not') . ' logged in');
-		}
-
-		return $m[1];
+		#unset($one);
 	}
 
 	public function closeAll() {
@@ -198,4 +150,5 @@ class StreamsManager {
 		}
 	}
 }
+
 

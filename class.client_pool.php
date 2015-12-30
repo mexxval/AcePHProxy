@@ -26,7 +26,8 @@ class ClientPool {
 
 	public function track4new() {
 		$read = array($this->socket); // опрашиваем только мастер-сокет (сервер)
-		$mod_fd = stream_select($read, $_w = NULL, $_e = NULL, 0, 20000);
+		$_ = array();
+		$mod_fd = stream_select($read, $_, $_, 0, 20000);
 		if ($mod_fd === FALSE) {
 			return false;
 		}
@@ -38,6 +39,12 @@ class ClientPool {
 
 		if ($read) { // есть событие на сокете сервера - Новый клиент
 			$conn = stream_socket_accept($this->socket, 1, $peer); // peer заполняется по ссылке
+			// также при желании пишем в лог о новом коннекте
+			// и желательно сразу, а то пока до главного цикла дойдет, окажется что клиент уже и данные прислал
+			// а мы после этого только пишем, что он приконнектился
+			// еще одна мелкая эстетическая проблемка. когда клиент рвет соединение и тут же создает новое 
+			// в логе пишется сначала connected для нового. затем disconnected для старого коннекта
+			error_log('connected ' . $peer);
 			$this->clients[$peer] = new StreamClient($peer, $conn);
 			$newclients[$peer] = null;
 		}
@@ -62,7 +69,6 @@ class ClientPool {
 				// компактненько тут не обойдешься... TODO
 				$result = $one->track4new();
 				if ($result) {
-					$result['client'] = $one;
 					$startreq[$peer] = $result;
 				}
 			}
@@ -73,6 +79,9 @@ class ClientPool {
 				unset($one);
 				unset($this->clients[$peer]);
 				$doneclients[$peer] = null;
+				// ассоциированные трансляции должны удалиться через __destruct клиента
+				// тут можно разве что в лог написать
+				error_log('disconnected ' . $peer);
 
 				if (in_array($e->getCode(), array(3, 4))) {
 					$recheck = true;

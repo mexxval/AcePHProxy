@@ -11,20 +11,20 @@ class EventController {
 	protected $www_ok = true;
 	protected $cur_x;
 	protected $cur_y;
-	protected $map;
+	protected $map = array();
+	protected $colwid = array(); // ширины столбцов
 
 	public function __construct() {
-		$col = 0;
 		// конфиг раскладки по колонкам
-		$this->map = array(
-			0 => $col += 2, // channel
-			$col += 24, // Buffer, but 25 is Channel width!
-			$col += 7,	// State
-			$col += 9,	// up/down bytes
-			$col += 17,	// peers
-			$col += 6,	// Client list
-			$col += 24,	// download/upload speed
-			$col += 8
+		$this->colwid = array(
+			0 => 24, // channel (variable!)
+			7, // Buffer
+			9,	// State
+			17,	// up/down bytes
+			6,	// peers
+			24,	// Client list
+			8,	// download/upload speed
+			8
 		);
 	}
 
@@ -36,7 +36,7 @@ class EventController {
 		ncurses_end(); // выходим из режима ncurses, чистим экран
 	}
 
-	public function init() {
+	public function init($title = 'AcePHProxy') {
 		// начинаем с инициализации библиотеки
 		$ncurse = ncurses_init();
 		// используем весь экран
@@ -49,11 +49,11 @@ class EventController {
 		$this->cur_y = $y;
 
 		// создаём второе окно для лога
-		$rows = 10; $cols = $x; $sy = $y - $rows; $sx = 0;
+		$rows = floor($y / 2); $cols = $x; $sy = $y - $rows; $sx = 0;
 		$this->windows['log'] = ncurses_newwin($rows, $cols, $sy, $sx);
 
 		// и окно для статистики (остальное пространство)
-		$rows = $y - 10 - 1; $cols = $x; $sy = 1; $sx = 0; // еще -1 чтобы границы не перекрывались
+		$rows = $y - $rows - 1; $cols = $x; $sy = 1; $sx = 0; // еще -1 чтобы границы не перекрывались
 		$this->windows['stat'] = ncurses_newwin($rows, $cols, $sy, $sx);
 
 		if (ncurses_has_colors()) {
@@ -73,9 +73,8 @@ class EventController {
 		ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
 		ncurses_wborder($this->windows['stat'], 0,0, 0,0, 0,0, 0,0);
 
-		ncurses_attron(NCURSES_A_REVERSE);
-		ncurses_mvaddstr(0, 1, "AcePHProxy");
-		ncurses_attroff(NCURSES_A_REVERSE);
+		$this->outputTitle($title);
+
 		ncurses_nl ();
 		ncurses_curs_set (0); // visibility
 
@@ -92,9 +91,34 @@ class EventController {
 			$this->closeClean();
 			$this->init();
 		}
+
 		// save current main window size
 		$this->cur_x = $x;
 		$this->cur_y = $y;
+
+		// ширина первого столбца определяется как разность ширины окна и всех столбцов, кроме первого
+		$colsum = array_sum($this->colwid) - $this->colwid[0];
+		$this->colwid[0] = $this->cur_x - $colsum;
+
+		// renew map
+		$col = 0;
+		$this->map = array(
+			0 => $col += 2, // channel
+			$col += $this->colwid[0], // Buffer, but 25 is Channel width!
+			$col += $this->colwid[1],	// State
+			$col += $this->colwid[2],	// up/down bytes
+			$col += $this->colwid[3],	// peers
+			$col += $this->colwid[4],	// Client list
+			$col += $this->colwid[5],	// download/upload speed
+			$col += $this->colwid[6]
+		);
+	}
+
+	protected function outputTitle($title) {
+		ncurses_attron(NCURSES_A_REVERSE);
+		ncurses_mvaddstr(0, 1, $title);
+		ncurses_attroff(NCURSES_A_REVERSE);
+		ncurses_refresh(); // рисуем окна
 	}
 
 	// вызывать каждый цикл. выводим массив трансляций
@@ -108,30 +132,31 @@ class EventController {
 		$map = $this->map;
 
 		// выводим все коннекты и трансляции
-		$this->output('stat', $i, $map[0], "Channel");
-		$this->output('stat', $i, $map[1], "Buffer");
-		$this->output('stat', $i, $map[2], "State");
-		$this->output('stat', $i, $map[3], "Up  (Mb) Down");
-		$this->output('stat', $i, $map[4], "Peers");
-		$this->output('stat', $i, $map[5], "Client");
-		$this->output('stat', $i, $map[6], "DL (kbps) UL");
+		$this->output('stat', $i, 0, "Channel");
+		$this->output('stat', $i, 1, "Buffer");
+		$this->output('stat', $i, 2, "State");
+		$this->output('stat', $i, 3, "Up  (Mb) Down");
+		$this->output('stat', $i, 4, "Peers");
+		$this->output('stat', $i, 5, "Client");
+		$this->output('stat', $i, 6, "DL (kbps) UL");
 		$i++;
 
 		foreach ($streams as $row) {
 			$i++;
 			foreach ($row as $colidx => $str) {
-				$this->output('stat', $i, $map[$colidx], $str);
+				$this->output('stat', $i, $colidx, $str);
 			}
 		}
 
 		// состояние инета
 		// ascii table http://www.linuxivr.com/c/week6/ascii_window.jpg
-		$str = sprintf('%swww %s%s',
-			iconv('cp866', 'utf8', chr(0xb4)),
-			$this->www_ok ? 'ON' : 'OFF', 
-			iconv('cp866', 'utf8', chr(0xc3))
+		#iconv('cp866', 'utf8', chr(0xb4)),
+		#iconv('cp866', 'utf8', chr(0xc3))
+		$str = array(
+			0 => $this->www_ok ? EventController::CLR_GREEN : EventController::CLR_ERROR,
+			1 => sprintf(' %s ', $this->www_ok ? 'online' : 'offline')
 		);
-		$this->output('stat', 0, 88, $str);
+		$this->output('stat', 0, 6, $str);
 
 		ncurses_wrefresh($this->windows['stat']);
 
@@ -141,13 +166,15 @@ class EventController {
 		ncurses_wrefresh($this->windows['log']);
 	}
 
-	protected function output($wcode, $y, $x, $str) {
+	protected function output($wcode, $y, $col, $str) {
+		$x = $this->map[$col];
 		$w = $this->windows[$wcode];
 		$color = null;
 		if (is_array($str)) {
 			$color = $str[0];
 			$str = $str[1];
 		}
+		$col === 0 and $str = mb_substr($str, 0, $this->colwid[$col] - 1); // -1 чтобы не сливался со след.столбцом
 
 		$color and ncurses_wcolor_set($w, $color);
 		ncurses_mvwaddstr($w, $y, $x, $str);
