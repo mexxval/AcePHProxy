@@ -1,4 +1,5 @@
 <?php
+
 class StreamsManager {
 	const KEEPALIVE_TIME = 3; // sec
 
@@ -70,8 +71,25 @@ class StreamsManager {
 	// Request translation Карусель (410)
 	// Got PID ...
 	// и только потом играет
-	public function start($pid, $name, $type = 'pid') {
+	public function start(ClientRequest $req) {
+		$response = ClientResponse::createResponse($req);
+
+		// короткий реквест типа "запрос-ответ"
+		if (!$response->isStream()) {
+			return $response->response();
+		}
+
+		// многофайловые торренты должны играть с учетом индекса файла
+		$pid = $req->getPid();
+		$name = $req->getName();
+		$type = $req->getType();
+
 		$streamid = $pid;
+		if (is_numeric($name)) {
+			$streamid .= $name;
+		}
+
+		$client = $req->getClient();
 		// если трансляции нет, создаем экземпляр, оно запустит коннект ace и сам pid
 		if (!isset($this->streams[$streamid])) {
 			$bufSize = isset($this->buffers[$streamid]) ? $this->buffers[$streamid] : null;
@@ -91,7 +109,6 @@ class StreamsManager {
 			}
 		}
 		else { // уже есть и запущено
-			#$this->log('Existing PID ' . $pid);
 			$this->streams[$streamid]->unfinish();
 		}
 		// если мы тут, значит поток либо успешно создан, либо уже был создан ранее
@@ -101,6 +118,10 @@ class StreamsManager {
 			$this->log('Cancel stop ' . $this->streams[$streamid]->getName());
 			unset($this->closeStreams[$streamid]);
 		}
+
+		// регистрируем клиента в потоке
+		$this->streams[$streamid]->registerClient($client);
+		$response->response();
 		return $this->streams[$streamid];
 	}
 

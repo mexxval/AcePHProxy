@@ -18,13 +18,12 @@ class EventController {
 		// конфиг раскладки по колонкам
 		$this->colwid = array(
 			0 => 24, // channel (variable!)
-			7, // Buffer
+			8, // Buffer
 			9,	// State
-			17,	// up/down bytes
 			6,	// peers
-			24,	// Client list
-			8,	// download/upload speed
-			8
+			15,	// up/down bytes
+			25,	// Client list
+			12,	// download/upload speed
 		);
 	}
 
@@ -36,7 +35,7 @@ class EventController {
 		ncurses_end(); // выходим из режима ncurses, чистим экран
 	}
 
-	public function init($title = 'AcePHProxy') {
+	public function init() {
 		// начинаем с инициализации библиотеки
 		$ncurse = ncurses_init();
 		// используем весь экран
@@ -53,7 +52,7 @@ class EventController {
 		$this->windows['log'] = ncurses_newwin($rows, $cols, $sy, $sx);
 
 		// и окно для статистики (остальное пространство)
-		$rows = $y - $rows - 1; $cols = $x; $sy = 1; $sx = 0; // еще -1 чтобы границы не перекрывались
+		$rows = $y - $rows; $cols = $x; $sy = 0; $sx = 0;
 		$this->windows['stat'] = ncurses_newwin($rows, $cols, $sy, $sx);
 
 		if (ncurses_has_colors()) {
@@ -72,8 +71,6 @@ class EventController {
 		// рамка для него
 		ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
 		ncurses_wborder($this->windows['stat'], 0,0, 0,0, 0,0, 0,0);
-
-		$this->outputTitle($title);
 
 		ncurses_nl ();
 		ncurses_curs_set (0); // visibility
@@ -96,21 +93,21 @@ class EventController {
 		$this->cur_x = $x;
 		$this->cur_y = $y;
 
+		$startoffset = 2; // небольшой отступ на отрисовку границ, чтобы на них не налезал контент
 		// ширина первого столбца определяется как разность ширины окна и всех столбцов, кроме первого
 		$colsum = array_sum($this->colwid) - $this->colwid[0];
-		$this->colwid[0] = $this->cur_x - $colsum;
+		$this->colwid[0] = $this->cur_x - $colsum - ($startoffset * 2); // *2 ибо с 2 сторон
 
 		// renew map
 		$col = 0;
 		$this->map = array(
-			0 => $col += 2, // channel
-			$col += $this->colwid[0], // Buffer, but 25 is Channel width!
+			0 => $col += $startoffset, // channel
+			$col += $this->colwid[0],	// Buffer, but 25 is Channel width!
 			$col += $this->colwid[1],	// State
 			$col += $this->colwid[2],	// up/down bytes
 			$col += $this->colwid[3],	// peers
 			$col += $this->colwid[4],	// Client list
 			$col += $this->colwid[5],	// download/upload speed
-			$col += $this->colwid[6]
 		);
 	}
 
@@ -122,29 +119,42 @@ class EventController {
 	}
 
 	// вызывать каждый цикл. выводим массив трансляций
-	public function tick($streams) {
+	public function tick($streams, $addinfo) {
 		ncurses_werase ($this->windows['stat']);
 		ncurses_wborder($this->windows['stat'], 0,0, 0,0, 0,0, 0,0);
 
 		$this->listen4resize();
 
+		if (isset($addinfo['title'])) {
+			$this->output('stat', 0, 2, $addinfo['title']);
+		}
+		if (isset($addinfo['port'])) {
+			$this->output('stat', 0, 25, sprintf(' Port %d ', $addinfo['port']));
+		}
+		if (isset($addinfo['ram'])) {
+			$this->output('stat', 0, 38, sprintf(' RAM: %s MB ', $addinfo['ram']));
+		}
+		if (isset($addinfo['uptime'])) {
+			$this->output('stat', 0, 54, sprintf(' Uptime %s ', $addinfo['uptime']));
+		}
+
 		$i = 1;
 		$map = $this->map;
 
 		// выводим все коннекты и трансляции
-		$this->output('stat', $i, 0, "Channel");
-		$this->output('stat', $i, 1, "Buffer");
-		$this->output('stat', $i, 2, "State");
-		$this->output('stat', $i, 3, "Up  (Mb) Down");
-		$this->output('stat', $i, 4, "Peers");
-		$this->output('stat', $i, 5, "Client");
-		$this->output('stat', $i, 6, "DL (kbps) UL");
+		$this->outputCol('stat', $i, 0, "");
+		$this->outputCol('stat', $i, 1, "Buffer");
+		$this->outputCol('stat', $i, 2, "State");
+		$this->outputCol('stat', $i, 3, "Peers");
+		$this->outputCol('stat', $i, 4, "Up  (MB) Down");
+		$this->outputCol('stat', $i, 5, "Client");
+		$this->outputCol('stat', $i, 6, "DL (kbps) UL");
 		$i++;
 
 		foreach ($streams as $row) {
 			$i++;
 			foreach ($row as $colidx => $str) {
-				$this->output('stat', $i, $colidx, $str);
+				$this->outputCol('stat', $i, $colidx, $str);
 			}
 		}
 
@@ -156,7 +166,7 @@ class EventController {
 			0 => $this->www_ok ? EventController::CLR_GREEN : EventController::CLR_ERROR,
 			1 => sprintf(' %s ', $this->www_ok ? 'online' : 'offline')
 		);
-		$this->output('stat', 0, 6, $str);
+		$this->outputCol('stat', 0, 6, $str);
 
 		ncurses_wrefresh($this->windows['stat']);
 
@@ -166,15 +176,25 @@ class EventController {
 		ncurses_wrefresh($this->windows['log']);
 	}
 
-	protected function output($wcode, $y, $col, $str) {
+	protected function outputCol($wcode, $y, $col, $str) {
 		$x = $this->map[$col];
+		$maxwid = $this->colwid[$col];
+		// -1 чтобы не сливалось со след.столбцом, но для последнего столбца неактуально
+		if ($col < count($this->colwid) - 1) {
+			$maxwid -= 1;
+		}
+		return $this->output($wcode, $y, $x, $str, $maxwid);
+	}
+	protected function output($wcode, $y, $x, $str, $maxwid = null) {
 		$w = $this->windows[$wcode];
 		$color = null;
 		if (is_array($str)) {
 			$color = $str[0];
 			$str = $str[1];
 		}
-		$col === 0 and $str = mb_substr($str, 0, $this->colwid[$col] - 1); // -1 чтобы не сливался со след.столбцом
+		if (!is_null($maxwid) and mb_strlen($str) > $maxwid) {
+			$str = mb_substr($str, 0, $maxwid);
+		}
 
 		$color and ncurses_wcolor_set($w, $color);
 		ncurses_mvwaddstr($w, $y, $x, $str);

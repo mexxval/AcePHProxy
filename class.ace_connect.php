@@ -32,7 +32,7 @@ class AceConnect {
 		return $conn;
 	}
 
-	public function startraw($pid, &$resourceName = '') {
+	public function startraw($pid, &$resourceName = '', $fileidx = 0) {
 		$resourceName = '';
 		$conn = $this->getConnection($pid);
 		if (!$conn->isAuthorized()) {
@@ -65,8 +65,7 @@ class AceConnect {
 			$answer = json_decode(substr($answer, 12), true);
 			// первый попавшийся filename берем как название ресурса
 			if (isset($answer['files'], $answer['files'][0], $answer['files'][0][0])) {
-				$resourceName = $answer['files'][0][0];
-				error_log('SET RESOURCE NAME = ' . $resourceName);
+				$resourceName = urldecode($answer['files'][0][0]);
 			}
 		}
 
@@ -75,7 +74,7 @@ class AceConnect {
 		//	[["%D0%92%D0%B5%D0%BA.%D0%90%D0%B4%D0%B0%D0%BB%D0%B8%D0%BD.2015.WEB-DL.%5B1080p%5D.NNM-CLUB.mkv", 0]], 
 		//	"infohash": "6af888601fcf25f8eecce113d5e3d11cc57e1cb7", "checksum": "d8cc03f0f147ac87210ba7eb3bcba3eecdd52c3c"}
 
-		$this->send($pid, 'START RAW ' . $base64 . ' 0 0 0 0', 10);
+		$this->send($pid, 'START RAW ' . $base64 . ' ' . $fileidx . ' 0 0 0', 10);
 		return $conn;
 	}
 

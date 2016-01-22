@@ -15,6 +15,7 @@ class StreamClient {
 	protected $pointer = 0; // указатель на буфер
 	protected $pointerPos = 0; // позиция указателя в буфере, %. Т.е. фактически сколько буфера уже ушло на клиент
 	protected $tsconnected; // когда подключился
+	protected $bytesgot = 0; // сколько данных принял
 	protected $isAccepted = false; // отправлены ли на клиент HTTP заголовки
 
 	public function __construct($peer, $socket) {
@@ -38,6 +39,34 @@ class StreamClient {
 	public function getUptimeSeconds() {
 		return time() - $this->tsconnected;
 	}
+	public function getUptime() {
+		$allsec = $this->getUptimeSeconds();
+		// собираем строку времени
+		$secs = sprintf('%02ds', $allsec % 60);
+		$hours = $mins = '';
+		if ($tmp = floor($allsec / 3600)) {
+			$hours = sprintf('%dh ', $tmp);
+		}
+		if ($tmp = floor(($allsec - intval($hours) * 3600) / 60)) {
+			$mins = sprintf('%02dm ', $tmp);
+		}
+		return $hours . $mins . $secs;
+	}
+	public function getTraffic() {
+		$bytes = $this->bytesgot;
+		if ($bytes < 1024) {
+			$units = 'B';
+		} else if (($bytes /= 1024) < 1024) {
+			$units = 'kB';
+		} else if (($bytes /= 1024) < 1024) {
+			$units = 'MB';
+		} else if (($bytes /= 1024) < 1024) {
+			$units = 'GB';
+		} else {
+			$units = 'TB';
+		}
+		return sprintf('%d %s', $bytes, $units);
+	}
 
 	public function isFinished() {
 		return $this->finished;
@@ -55,6 +84,9 @@ class StreamClient {
 	}
 
 	public function accept($headers) {
+		if ($this->isAccepted()) { // клиент уже получил заголовки, пропускаем
+			return;
+		}
 		$this->pointer = 0;
 		$this->pointerPos = 0;
 		$this->isAccepted = true;
@@ -141,11 +173,13 @@ class StreamClient {
 		if ($b == -1) {
 			return $b;
 		}
+		// а $b может быть false или другим не-числом?
 		if ($correctPointer) {
 			$this->pointer += $b; // корректировка указателя
 			$this->pointerPos = $dataLen ? round($this->pointer / $dataLen * 100) : 0; // и его позиции в %
 		}
-		error_log($this->getName() . ' put ' . $b . ' of ' . $bufSize . ' total ' . $this->pointer);
+		// обновим статистику записанных на клиента байт
+		$this->bytesgot += $b;
 
 		// если сокет полон и дальше не лезет - выдаем сколько байт НЕ записалось
 		return $bufSize - $b;
@@ -292,7 +326,7 @@ class ClientRequest {
 	protected $client;
 
 	public function __construct($data, $client) {
-		error_log('client send: ' . $data);
+		#error_log('client send: ' . $data);
 		$this->req = $data;
 		$this->client = $client;
 		$this->start = $this->parse($this->req);
@@ -315,6 +349,9 @@ class ClientRequest {
 	}
 	public function getHeaders() {
 		return $this->req;
+	}
+	public function getUri() {
+		return $this->start['reqUri'];
 	}
 
 	public function getReqType() {
@@ -351,7 +388,7 @@ class ClientRequest {
 		$uriInfo['uriType'] = $tmp[1]; // между первым и вторым слешами
 		$uriInfo['uriAddr'] = urldecode($tmp[2]);
 		// название торрента - необязательный параметр. скоро через LOADASYNC получать будем
-		$uriInfo['uriName'] = isset($tmp[3]) ? urldecode($tmp[3]) : $uriInfo['uriAddr'];
+		$uriInfo['uriName'] = isset($tmp[3]) ? urldecode($tmp[3]) : '';
 
 		// types:
 		// pid - start by PID
@@ -364,6 +401,190 @@ class ClientRequest {
 		// upd: жду от клиента полных заголовков, и только потом обрабатываю. вернул исключенеи
 		#throw new Exception('Unknown request', 15);
 		return $result + $uriInfo;
+	}
+}
+
+abstract class ClientResponse {
+	protected $req;
+	protected $client;
+
+	static function createResponse(ClientRequest $req) {
+		// для пробивочного запроса выдаем заголовки и закрываем коннект
+		if ($req->getReqType() == 'HEAD' or ($req->isRanged() and $req->isEmptyRanged())) {
+			return new ClientResponseHead($req);
+		}
+
+		$type = $req->getType();
+		// для запроса плейлиста тоже отрабатываем коротким ответом
+		// выдадим в качестве плейлиста список .torrent файлов из папки /STORAGE/FILES
+		if ($type == 'playlist') {
+			return new ClientResponsePlaylist($req);
+		}
+
+		$pid = $req->getPid();
+		$name = $req->getName();
+
+		switch ($type) {
+			case 'file':
+			case 'pid':
+			case 'trid':
+			case 'acelive':
+			case 'torrent':
+			case 'tracker':
+				break;
+			default:
+				// сервим как http запрос файла
+				return new ClientResponseFile($req);
+				# throw new Exception('Unknown request type');
+		}
+
+		return new ClientResponseStream($req);
+	}
+
+	public function __construct(ClientRequest $req) {
+		$this->req = $req;
+		$this->client = $this->req->getClient();
+	}
+
+	public function isStream() {
+		return false;
+	}
+	abstract public function response();
+}
+
+class ClientResponseStream extends ClientResponse {
+	public function isStream() {
+		return true;
+	}
+	public function response() {
+	}
+}
+
+class ClientResponseHead extends ClientResponse {
+	public function response() {
+		$response = 'HTTP/1.1 200 OK' . "\r\n" .
+			'Accept-Ranges: bytes' . "\r\n\r\n";
+		$this->client->put($response);
+		return $this->client->close();
+	}
+}
+
+class ClientResponsePlaylist extends ClientResponse {
+	// выдает список торрентов из папки
+	// если торрент из нескольких видеофайлов - выдаем его как плейлист
+	public function response() {
+		$req = $this->req;
+		$playlist =  '#EXTM3U' . "\r\n";
+
+		$curFile = $req->getPid();
+		if (substr($curFile, -12) !== '.torrent.m3u') { // интересуют только торренты
+			$curFile = null;
+		} else {
+			// xbmc не воспринимает содержимое как плейлист без расширения m3u
+			// может еще удастся поиграть и настроить через хедеры или mime
+			$curFile = substr($curFile, 0, -4);
+		}
+
+		$basedir = '/STORAGE/FILES/';
+		$lib_loaded = class_exists('BDecode');
+		// это запрос на чтение содержимого торрент-файла
+		if ($lib_loaded and is_file($path = ($basedir . $curFile))) {
+			$torrent = new BDecode($path);
+			$files = $torrent->result['info']['files'];
+			foreach ($files as $idx => $one) {
+				$name = $one['path'][0];
+				// TODO hostname брать из запроса
+				$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+					'http://video.sci-smart.ru:8001/torrent/' . $curFile . '/' . $idx . "\r\n";
+			}
+		} else {
+			$torList = glob($basedir . '*.torrent');
+			foreach ($torList as $one) {
+				$basename = basename($one);
+				$name = str_replace('.torrent', '', $basename);
+
+				$isMultifiled = false;
+				// попробуем декодировать торрент и получить некоторое инфо
+				if ($lib_loaded) {
+					$torrent = new BDecode($one);
+					if (isset($torrent->result['info']['name'])) {
+						$name = $torrent->result['info']['name'];
+					}
+					$files = isset($torrent->result['info']['files']) ? 
+						$torrent->result['info']['files'] : array();
+					$count = count($files);
+					foreach ($files as $f) {
+						// отсеем всякие сопутствующие фильмам файлы
+						if (in_array(substr($f['path'][0], -4), array('.srt', '.ac3'))) {
+							$count--;
+						}
+					}
+					if ($count > 1) {
+						$isMultifiled = true;
+					}
+				}
+
+				// принимаем решение, запускать файл или выдавать как плейлист
+				// TODO hostname брать из запроса
+				if ($isMultifiled) {
+					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+						'http://video.sci-smart.ru:8001/playlist/' . $basename . '.m3u' . "\r\n";
+				} else {
+					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+						'http://video.sci-smart.ru:8001/torrent/' . $basename . "\r\n";
+				}
+			}
+		}
+		/*
+					$source_url = isset($torrent->result['publisher-url']) ? 
+						$torrent->result['publisher-url'] : $torrent->result['comment'];
+					$source = isset($torrent->result['publisher']) ? $torrent->result['publisher'] : null;
+					$files = $torrent->result['info']['files'];
+					//file_put_contents('torrents', json_encode($torrent->result) . PHP_EOL, FILE_APPEND);
+					#error_log($name . ' => ' . $source);
+					#error_log($source_url);
+				if ($basename == 'Z Nation 1 - LostFilm.TV [1080p].torrent' and $torrent) {
+					$info = $torrent->result['info'];
+					unset($info['pieces']);
+					error_log(var_export($info, 1));
+				}
+
+		 */
+
+		$response = 'HTTP/1.1 200 OK' . "\r\n" .
+			'Connection: close' . "\r\n" .
+			'Content-Type: text/plain' . "\r\n" .
+			'Content-Length: ' . strlen($playlist) . "\r\n" .
+			'Accept-Ranges: bytes' . "\r\n\r\n" .
+			$playlist;
+		$this->client->put($response);
+		return $this->client->close();
+	}
+}
+
+class ClientResponseFile extends ClientResponse {
+	public function response() {
+		$req = $this->req;
+		$root = '/STORAGE/FILES/';
+		$filepath = $root . $req->getUri();
+
+		$contents = '';
+		if (!is_file($filepath)) {
+			$response = 'HTTP/1.1 404 Not Found' . "\r\n" .
+				'Connection: close' . "\r\n" .
+				"\r\n";
+		} else {
+			$contents = file_get_contents($filepath);
+			$response = 'HTTP/1.1 200 OK' . "\r\n" .
+				'Connection: close' . "\r\n" .
+				'Content-Type: text/plain' . "\r\n" .
+				'Content-Length: ' . strlen($contents) . "\r\n" .
+				'Accept-Ranges: bytes' . "\r\n" .
+				"\r\n" .
+				$contents;
+		}
+		$this->client->put($response);
+		return $this->client->close();
 	}
 }
 

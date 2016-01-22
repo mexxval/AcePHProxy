@@ -19,11 +19,11 @@ class StreamUnit {
 	const RESTART_COUNT = 30;
 	const BUFFER_LENGTH = 15e6;
 
-	const STATE_STARTING = 0x01;
-	const STATE_STARTED = 0x02;
-	const STATE_HDRREAD = 0x03;
-	const STATE_HDRSENT = 0x04;
-	const STATE_CHUNKWAIT = 0x05; // ожидание длины чанка
+	const STATE_STARTING = 0x01; // самое начало, когда только-только вызван метод start
+	const STATE_STARTED = 0x02; // получили ссылку от Ace Server
+	const STATE_HDRREAD = 0x03; // начало чтения заголовков потока
+	const STATE_HDRSENT = 0x04; // Потоковая передача, все подготовлено, и пошла собственно выдача видео
+	const STATE_CHUNKWAIT = 0x05; // ожидание длины чанка, аналог _HDRSENT, но для Chunked потока
 	const STATE_CHUNKREAD = 0x06; // чтение чанка на полученную длину
 	const STATE_ERROR = 0x08;
 	const STATE_IDLE = 0x09;
@@ -77,7 +77,15 @@ class StreamUnit {
 	public function start($pid, $name, $soe = true) {
 		try {
 			$this->cur_pid = $pid;
-			$this->cur_name = $name;
+			$this->cur_name = '';
+			$cur_fileidx = 0;
+			if (is_numeric($name)) { // передан индекс файла для воспроизведения
+				// например для торрентов сериалов это номер серии
+				$cur_fileidx = $name;
+			} else {
+				$this->cur_name = $name;
+			}
+
 			$this->state = self::STATE_STARTING;
 			$this->startTime = time();
 			$type = $this->getType();
@@ -88,8 +96,11 @@ class StreamUnit {
 					$this->isLive = true;
 					$this->waitSec = 30; // cycles ~ seconds
 					break;
+				case 'tracker': // сливаем с rutracker torrent файл
+					// в cur_pid достаточно URL положить
+					$this->cur_pid = 'http://172.30.0.10/multimedia/getTorrentContentsBinary/' . $this->cur_pid;
 				case 'torrent':
-					$conn = $this->ace->startraw($this->cur_pid, $tmp);
+					$conn = $this->ace->startraw($this->cur_pid, $tmp, $cur_fileidx);
 					// в tmp кладется название из LOADRESP
 					if ($tmp) {
 						$this->cur_name = $tmp;
@@ -118,7 +129,6 @@ class StreamUnit {
 					if ($type == 'acelive') {
 						$pid = sprintf('http://content.asplaylist.net/cdn/%d_all.acelive', $pid);
 					}
-					error_log('Got link ' . $pid);
 				default:
 					$conn = $this->ace->starttorrent($pid);
 					$this->isLive = true;
@@ -156,7 +166,7 @@ class StreamUnit {
 		Все числа передаются как integer.
 		Все progress принимают значение от 0 до 100.
 		*/
-		error_log($aceline);
+		// error_log($aceline);
 		$pattern = '~^STATUS\smain:(?<state>buf|prebuf|dl|check);(?<percent>\d+)(;(\d+;\d+;)?\d+;' .
 			'(?<spdn>\d+);\d+;(?<spup>\d+);(?<peers>\d+);\d+;(?<dlb>\d+);\d+;(?<ulb>\d+))?$~s';
 		if (preg_match($pattern, $aceline, $m)) {
@@ -239,8 +249,6 @@ class StreamUnit {
 	 *		Это должно работать, т.к. на каждый из серии начальных коннектов приходится совсем немного данных.
 	 * клиент делает запрос #3, сбрасывая #1. #2 еще активен, туда записан минимум 1 буфер, но тут..
 	 * ..клиент сбрасывает #2 и делает #4.. ну и т.д.
-	 * TODO надо только придумать что то с буферизацией на клиенте. пихать данные для начальных запросов лучше целиком
-	 *		без указания bufSize, но когда все устаканится, пойдет много данных и на клиента в итоге не полезет
 	 * TODO волшебный функционал: для поддержки нескольких клиентов на 1 фильм, да еще и с
 	 *		индивидуальной перемоткой для каждого, можно быстро метаться между кусками ресурса,
 	 *		считывая на клиент, пока тот не подавится
@@ -268,7 +276,7 @@ class StreamUnit {
 			throw new Exception('Failed to open stream link');
 		}
 		// пишем заголовки запроса
-		error_log('open stream request ' . $headers);
+		#error_log('open stream request ' . $headers);
 		// почему использована именно эта функция? при записи нужен блокирующий режим
 		// stream_socket_sendto($link_src, $headers);
 		fwrite($link_src, $headers);
@@ -276,13 +284,11 @@ class StreamUnit {
 		// теперь ждем заголовков ответа, сохраним их отдельно
 		// при этом режим дб блокирующий, иначе нам не успеют ответить
 		$this->headers = $this->readStreamHeaders($link_src);
-		error_log('open stream response ' . json_encode($this->headers));
+		#error_log('open stream response ' . json_encode($this->headers));
 
 		// поток открыт, пора всех клиентов оповестить и раздать им заголовки
+		// я не проверял, но думаю тут всегда один клиент
 		foreach ($this->getClients() as $c) {
-			if ($c->isAccepted()) { // клиент уже получил заголовки, пропускаем
-				continue;
-			}
 			// отправляем хттп заголовки ОК
 			$c->accept($this->getHeadersPlainText());
 		}
@@ -329,7 +335,6 @@ class StreamUnit {
 	}
 
 	protected function closeStream() {
-		error_log('closing stream');
 		return $this->isActive() and fclose($this->resource);
 	}
 
@@ -370,9 +375,20 @@ class StreamUnit {
 		}
 		else if ($state == 'dl') {
 			$state = 'PLAY';
+			// для кина рисуем другую картинку
+			if (!$this->isLive) {
+				$s = ')'; // различные варианты значков
+				#$s = iconv('cp866', 'utf8', chr(186));
+				#$s = iconv('cp866', 'utf8', chr(249));
+				$list = array("$s   ", "$s$s  ", "$s$s$s ", " $s$s ", "  $s ", "    ");
+				// * 4 регулирует скорость. больше множитель - выше скорость
+				$symbolidx = round(microtime(1) * 3) % count($list);
+				$symbol = $list[$symbolidx];
+				$state = ($perc == 100 ? $perc : ($symbol . $perc)) . '%';
+			}
 		}
 		else if ($this->state == self::STATE_STARTED) {
-			#$state = 'run';
+			$state = 'READ';
 		}
 		else if ($this->state == self::STATE_STARTING) {
 			$state = 'START';
@@ -430,7 +446,16 @@ class StreamUnit {
 		$peer = $client->getName();
 		$this->clients[$peer] = $client;
 		$client->associateStream($this);
+
 		if ($this->isLive) {
+			// если поток уже открыт и воспроизводится, то похоже это дополнительные клиенты
+			// надо им отослать заголовки! а то внезапно оказалось, что более 1 клиента на одну 
+			// трансляцию перестало обслуживаться
+			// для Live-режима заголовки те же самые, одинаковые для всех
+			// для просмотра торрентов отдельная песня. там разные Range: bytes должны быть
+			if ($this->isRunning())	{
+				$client->accept($this->getHeadersPlainText());
+			}
 			return;
 		}
 
@@ -442,6 +467,15 @@ class StreamUnit {
 			return;
 		}
 		$this->restartStream();
+	}
+
+	// метод отвечает, запущена ли уже выдача видео, т.е. в основном ли рабочем состоянии находится объект
+	protected function isRunning() {
+		return in_array($this->state, array(
+			self::STATE_CHUNKWAIT,
+			self::STATE_HDRSENT,
+			self::STATE_CHUNKREAD
+		));
 	}
 
 	protected function restartStream() {
@@ -503,7 +537,7 @@ class StreamUnit {
 		while ($line = trim(fgets($res))) {
 			if ($this->state == self::STATE_STARTED) {
 				if (strpos($line, 'HTTP/1.') === false) {
-					throw new Exception('HTTP 200 OK header expected. Got ' . $line);
+					throw new Exception('HTTP header expected. Got ' . $line);
 				}
 				$this->state = self::STATE_HDRREAD;
 			}
@@ -511,7 +545,6 @@ class StreamUnit {
 				list ($name, $value) = array_map('trim', explode(':', $line));
 				if ($name == 'Transfer-Encoding' and $value == 'chunked') {
 					$this->isChunked = true;
-					error_log('Chunked mode');
 				}
 				if (0
 					// вот этот хедер здорово мешал, по сути препятствовал запуску потока
@@ -536,6 +569,7 @@ class StreamUnit {
 			throw new Exception('Headers contains error: ' . $err);
 		}
 
+		// устанавливается состояние Потоковая передача. 
 		$this->state = $this->isChunked ? self::STATE_CHUNKWAIT : self::STATE_HDRSENT;
 		return $headers;
 	}
@@ -667,7 +701,6 @@ class StreamUnit {
 		}
 		$datalen = strlen($data);
 
-#		error_log('Got ' . $datalen . ' from source');
 		// контролируем, весь ли буфер прочитан
 		if ($this->state == self::STATE_CHUNKREAD) {
 			if ($datalen < $this->currentChunkSize) {

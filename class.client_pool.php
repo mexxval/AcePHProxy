@@ -37,30 +37,16 @@ class ClientPool {
 		$doneclients = array(); // disconnected
 		$startreq = array(); // client->pid for start
 
-		if ($read) { // есть событие на сокете сервера - Новый клиент
-			$conn = stream_socket_accept($this->socket, 1, $peer); // peer заполняется по ссылке
-			// также при желании пишем в лог о новом коннекте
-			// и желательно сразу, а то пока до главного цикла дойдет, окажется что клиент уже и данные прислал
-			// а мы после этого только пишем, что он приконнектился
-			// еще одна мелкая эстетическая проблемка. когда клиент рвет соединение и тут же создает новое 
-			// в логе пишется сначала connected для нового. затем disconnected для старого коннекта
-			error_log('connected ' . $peer);
-			$this->clients[$peer] = new StreamClient($peer, $conn);
-			$newclients[$peer] = null;
-		}
-
 		// флаг необходимости срочно опросить сокеты еще раз
 		$recheck = false;
 
 		// теперь надо по всем клиентам пройти и спросить. нет ли у них на сокетах событий
 		foreach ($this->clients as $peer => $one) {
-			if ($one->isFinished()) {
-				$one->close();
-				unset($this->clients[$peer]);
-				continue;
-			}
-
 			try {
+				if ($one->isFinished()) {
+					throw new Exception('Close finished client');
+				}
+
 				// тут такая логика: xbmc при открытии m3u по каждому элементу коннектится и
 				// спрашивает инфу, отдельно. а в главном цикле демона задержка около 30мс
 				// из-за нее плейлист из 10 строк открывается секунду.
@@ -87,6 +73,18 @@ class ClientPool {
 					$recheck = true;
 				}
 			}
+		}
+
+		if ($read) { // есть событие на сокете сервера - Новый клиент
+			$conn = stream_socket_accept($this->socket, 1, $peer); // peer заполняется по ссылке
+			// также при желании пишем в лог о новом коннекте
+			// и желательно сразу, а то пока до главного цикла дойдет, окажется что клиент уже и данные прислал
+			// а мы после этого только пишем, что он приконнектился
+			// еще одна мелкая эстетическая проблемка. когда клиент рвет соединение и тут же создает новое 
+			// в логе пишется сначала connected для нового. затем disconnected для старого коннекта
+			error_log('connected ' . $peer);
+			$this->clients[$peer] = new StreamClient($peer, $conn);
+			$newclients[$peer] = null;
 		}
 
 		return array(
