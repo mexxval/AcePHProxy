@@ -24,6 +24,7 @@ class StreamClient {
 		stream_set_blocking($this->socket, 0);
 		stream_set_timeout($this->socket, 0, 20000);
 		$this->tsconnected = time();
+		# error_log('construct client ' . spl_object_hash ($this));
 	}
 
 	public function getIp() {
@@ -315,6 +316,7 @@ class StreamClient {
 	}
 
 	public function __destruct() {
+		# error_log(' destruct client ' . spl_object_hash ($this));
 	}
 }
 
@@ -330,6 +332,7 @@ class ClientRequest {
 		$this->req = $data;
 		$this->client = $client;
 		$this->start = $this->parse($this->req);
+		# error_log('construct request ' . spl_object_hash ($this));
 	}
 	public function getName() {
 		return $this->start['uriName'];
@@ -366,6 +369,9 @@ class ClientRequest {
 	public function getReqRange() {
 		return $this->start['range'];
 	}
+	public function getHttpHost($withPort = true) { // TODO withPort=false
+		return $this->start['reqHost'];
+	}
 
 	// TODO тут не дб логики обработки и кидания исключений
 	// только разбор заголовков и выдача их в удобном виде
@@ -378,6 +384,8 @@ class ClientRequest {
 			'reqProto' => substr($firstLine, $rspace + 1),
 			'range' => preg_match('~Range: bytes=(\d+)-(\d+)?~sm', $sock_data, $m) ? 
 				array('from' => $m[1], 'to' => @$m[2]) : null,
+			'reqHost' => preg_match('~host: ([^\s]*)~smi', $sock_data, $m) ? 
+				$m[1] : null,
 		);
 
 		// немного дополним инфо о запросе, разобрав reqUri
@@ -401,6 +409,9 @@ class ClientRequest {
 		// upd: жду от клиента полных заголовков, и только потом обрабатываю. вернул исключенеи
 		#throw new Exception('Unknown request', 15);
 		return $result + $uriInfo;
+	}
+	public function __destruct() {
+		# error_log(' destruct request ' . spl_object_hash ($this));
 	}
 }
 
@@ -444,6 +455,10 @@ abstract class ClientResponse {
 	public function __construct(ClientRequest $req) {
 		$this->req = $req;
 		$this->client = $this->req->getClient();
+		# error_log('construct response ' . spl_object_hash ($this));
+	}
+	public function __destruct() {
+		# error_log(' destruct response ' . spl_object_hash ($this));
 	}
 
 	public function isStream() {
@@ -486,6 +501,7 @@ class ClientResponsePlaylist extends ClientResponse {
 		}
 
 		$basedir = '/STORAGE/FILES/';
+		$hostport = $req->getHttpHost(true); // true - с портом через двоеточие, если тот есть
 		$lib_loaded = class_exists('BDecode');
 		// это запрос на чтение содержимого торрент-файла
 		if ($lib_loaded and is_file($path = ($basedir . $curFile))) {
@@ -495,7 +511,7 @@ class ClientResponsePlaylist extends ClientResponse {
 				$name = $one['path'][0];
 				// TODO hostname брать из запроса
 				$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
-					'http://video.sci-smart.ru:8001/torrent/' . $curFile . '/' . $idx . "\r\n";
+					'http://' . $hostport . '/torrent/' . $curFile . '/' . $idx . "\r\n";
 			}
 		} else {
 			$torList = glob($basedir . '*.torrent');
@@ -528,10 +544,10 @@ class ClientResponsePlaylist extends ClientResponse {
 				// TODO hostname брать из запроса
 				if ($isMultifiled) {
 					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
-						'http://video.sci-smart.ru:8001/playlist/' . $basename . '.m3u' . "\r\n";
+						'http://' . $hostport . '/playlist/' . $basename . '.m3u' . "\r\n";
 				} else {
 					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
-						'http://video.sci-smart.ru:8001/torrent/' . $basename . "\r\n";
+						'http://' . $hostport . '/torrent/' . $basename . "\r\n";
 				}
 			}
 		}

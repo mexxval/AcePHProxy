@@ -27,9 +27,18 @@ class AceConnect {
 		}
 		# stream_set_blocking($conn, 0); // с этим херня полная
 		stream_set_timeout($conn, 1, 0); // нужно ли
-		$conn = new AceConn($conn, $pid);
+		$conn = new AceConn($conn, $pid, $this);
 		$res = $conn->auth($key);
 		return $conn;
+	}
+
+	public function _closeConn($pid) {
+		if (!isset($this->conn[$pid])) { // O_o
+			return false;
+		}
+		// $this->conn[$pid]->close(); // закроется через destruct
+		unset($this->conn[$pid]);
+		return;
 	}
 
 	public function startraw($pid, &$resourceName = '', $fileidx = 0) {
@@ -64,8 +73,8 @@ class AceConnect {
 		if ($answer) {
 			$answer = json_decode(substr($answer, 12), true);
 			// первый попавшийся filename берем как название ресурса
-			if (isset($answer['files'], $answer['files'][0], $answer['files'][0][0])) {
-				$resourceName = urldecode($answer['files'][0][0]);
+			if (isset($answer['files'], $answer['files'][$fileidx], $answer['files'][$fileidx][0])) {
+				$resourceName = urldecode($answer['files'][$fileidx][0]);
 			}
 		}
 
@@ -120,10 +129,13 @@ class AceConn {
 	protected $pid; // для связывания одного с другим
 	protected $auth = false;
 	protected $listener;
+	protected $parent;
 
-	public function __construct($conn, $pid) {
+	public function __construct($conn, $pid, $parent) {
 		$this->conn = $conn;
 		$this->pid = $pid;
+		$this->parent = $parent;
+		# error_log('construct aceconn ' . spl_object_hash($this));
 	}
 	public function getPID() {
 		return $this->pid;
@@ -176,6 +188,14 @@ class AceConn {
 		return $this->state !== 0;
 	}
 
+	public function close() {
+		// тут сохранялся объект StreamUnit, отчего даже при закрытии потока объект не уничтожался
+		$this->listener = null;
+		// вызываем через parent, Он управляет массивом коннектов
+		// дисконнект будет вызван через destruct
+		$this->parent->_closeConn($this->getPID());
+	}
+
 	public function readsocket($sec = 0, $usec = 300000) {
 		stream_set_timeout($this->conn, $sec, $usec);
 		$line = trim(fgets($this->conn));
@@ -204,8 +224,10 @@ class AceConn {
 
 	public function __destruct() {
 		$this->disconnect();
+		# error_log(' destruct aceconn ' . spl_object_hash($this));
 	}
 	protected function disconnect() {
+		$this->isActive() and $this->send('STOP');
 		fclose($this->conn);
 	}
 

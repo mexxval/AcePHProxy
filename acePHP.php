@@ -78,7 +78,7 @@
 //		[пробовал подсунуть такой torrent, ace его не ест. говорит "announce, nodes and announce-list missing"]
 
 
-define('ACEPHPROXY_VERSION', '0.6.3');
+define('ACEPHPROXY_VERSION', '0.6.4');
 
 require_once dirname(__FILE__) . '/class.bdecode.php';
 require_once dirname(__FILE__) . '/class.client_pool.php';
@@ -148,7 +148,7 @@ while (!$ctrlC) {
 		if ($new = $pool->track4new()) {
 			foreach ($new['start'] as $peer => $req) {
 				try {
-					$channel = $streams->start($req);
+					$streams->start($req);
 				}
 				catch (Exception $e) {
 					$client = $req->getClient();
@@ -158,7 +158,7 @@ while (!$ctrlC) {
 					$EVENTS->error($e->getMessage());
 				}
 			}
-			unset($info);
+			unset($info, $req, $client); // обязательно. ибо лишние object-ссылки
 
 			foreach ($new['new'] as $peer => $_) {
 			}
@@ -256,10 +256,6 @@ while (!$ctrlC) {
 
 // тормозим все трансляции, закрываем сокеты Ace
 $streams->closeAll();
-
-
-
-
 
 
 

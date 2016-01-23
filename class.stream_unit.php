@@ -18,6 +18,7 @@ class StreamUnit {
 	const BUF_DELTA_PRC = 5;
 	const RESTART_COUNT = 30;
 	const BUFFER_LENGTH = 15e6;
+	const INIT_LENGTH = 2e6; // 2mb
 
 	const STATE_STARTING = 0x01; // самое начало, когда только-только вызван метод start
 	const STATE_STARTED = 0x02; // получили ссылку от Ace Server
@@ -68,6 +69,7 @@ class StreamUnit {
 			'dl_bytes' => null,
 			'ul_bytes' => null,
 		) + $this->buf_adjusted;
+		# error_log('construct stream ' . spl_object_hash ($this));
 	}
 	public function getType() {
 		return $this->cur_type;
@@ -304,6 +306,7 @@ class StreamUnit {
 	}
 
 	public function __destruct() {
+		# error_log(' destruct stream ' . spl_object_hash ($this));
 	}
 
 	public function close() {
@@ -315,9 +318,8 @@ class StreamUnit {
 			// в __destruct у клиента нет кода самозакрытия, так что раскомментировал
 			// не работал сброс клиента при Failed to get link, помогло
 		}
-
 		$this->closeStream();
-		$this->cur_conn and $this->cur_conn->isActive() and $this->cur_conn->send('STOP');
+		$this->cur_conn and $this->cur_conn->close();
 		$this->finished = true;
 		$this->state = self::STATE_IDLE;
 	}
@@ -639,7 +641,7 @@ class StreamUnit {
 		// и записывать на клиент по 1 байтику не даст
 		// upd: емое,я с указателем перепутал, закэшированные данные в размере 
 		// могут только вырасти, с 0 до 15-30Мб
-		if ($this->isLive and $this->getBufferedLength() < 1000000) { // подкопим немного для начала
+		if ($this->isLive and $this->getBufferedLength() < self::INIT_LENGTH) { // подкопим немного для начала
 			return; // // убрал до ввода доп.флага различия старта и финиша
 		}
 
