@@ -84,14 +84,19 @@ class StreamClient {
 		$this->stream = $stream;
 	}
 
-	public function accept($headers) {
+	public function accept($headers, $pointer = 0, $pointerPos = 0) {
 		if ($this->isAccepted()) { // клиент уже получил заголовки, пропускаем
 			return;
 		}
 		$this->pointer = 0;
 		$this->pointerPos = 0;
 		$this->isAccepted = true;
-		return $this->put($headers);
+		// отправляем заголовки, тут pointer дб равен 0
+		$res = $this->put($headers);
+		// затем выставляем указатель в требуемое положение
+		$this->pointer = (int) $pointer;
+		$this->pointerPos = (int) $pointerPos;
+		return $res;
 	}
 
 	public function isAccepted() {
@@ -198,7 +203,7 @@ class StreamClient {
 			$this->pointer = 0;
 			// проблема подключения нового клиента, его сразу кикает в половине случаев
 			// будем кикать только если клиент хотя бы пару секунд был на связи
-			if ($this->getUptimeSeconds() > 2) {
+			if ($this->getUptimeSeconds() > 20) {
 				error_log('Close on negative pointer');
 				$this->close();
 			}
@@ -489,7 +494,7 @@ class ClientResponsePlaylist extends ClientResponse {
 	// если торрент из нескольких видеофайлов - выдаем его как плейлист
 	public function response() {
 		$req = $this->req;
-		$playlist =  '#EXTM3U' . "\r\n";
+		$playlist = array();
 
 		$curFile = $req->getPid();
 		if (substr($curFile, -12) !== '.torrent.m3u') { // интересуют только торренты
@@ -508,9 +513,9 @@ class ClientResponsePlaylist extends ClientResponse {
 			$torrent = new BDecode($path);
 			$files = $torrent->result['info']['files'];
 			foreach ($files as $idx => $one) {
-				$name = $one['path'][0];
+				$name = implode('/', $one['path']);
 				// TODO hostname брать из запроса
-				$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+				$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
 					'http://' . $hostport . '/torrent/' . $curFile . '/' . $idx . "\r\n";
 			}
 		} else {
@@ -531,7 +536,8 @@ class ClientResponsePlaylist extends ClientResponse {
 					$count = count($files);
 					foreach ($files as $f) {
 						// отсеем всякие сопутствующие фильмам файлы
-						if (in_array(substr($f['path'][0], -4), array('.srt', '.ac3'))) {
+						$tmp = implode('/', $f['path']);
+						if (in_array(substr($tmp, -4), array('.srt', '.ac3'))) {
 							$count--;
 						}
 					}
@@ -543,10 +549,10 @@ class ClientResponsePlaylist extends ClientResponse {
 				// принимаем решение, запускать файл или выдавать как плейлист
 				// TODO hostname брать из запроса
 				if ($isMultifiled) {
-					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
 						'http://' . $hostport . '/playlist/' . $basename . '.m3u' . "\r\n";
 				} else {
-					$playlist .= '#EXTINF:-1,' . $name . "\r\n" .
+					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
 						'http://' . $hostport . '/torrent/' . $basename . "\r\n";
 				}
 			}
@@ -566,6 +572,9 @@ class ClientResponsePlaylist extends ClientResponse {
 				}
 
 		 */
+
+		ksort($playlist);
+		$playlist =  '#EXTM3U' . "\r\n" . implode("\r\n", $playlist);
 
 		$response = 'HTTP/1.1 200 OK' . "\r\n" .
 			'Connection: close' . "\r\n" .

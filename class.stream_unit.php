@@ -456,7 +456,11 @@ class StreamUnit {
 			// для Live-режима заголовки те же самые, одинаковые для всех
 			// для просмотра торрентов отдельная песня. там разные Range: bytes должны быть
 			if ($this->isRunning())	{
-				$client->accept($this->getHeadersPlainText());
+				// попробуем решить проблему отвала VLC по negative counter таким способом:
+				// нового клиента цепляем на середину буфера
+				$pointerPos = 50;
+				$pointer = round(strlen($this->buffer) * $pointerPos / 100);
+				$client->accept($this->getHeadersPlainText(), $pointer, $pointerPos);
 			}
 			return;
 		}
@@ -748,6 +752,9 @@ class StreamUnit {
 
 	// data на входе только для контроля ситуации, идет ли считывание из ace
 	protected function adjustBuffer($data, &$adjusted = null) {
+		// логика адаптивной подстройки буфера выключена, фигня
+		$adaptiveBuffer = false;
+
 		$adjusted = null; // не используется в общем то
 
 		$this->buf_adjusted['emptydata'] = empty($data);
@@ -792,16 +799,45 @@ class StreamUnit {
 		$changeTime = time() - $this->buf_adjusted['changed'];
 		if ($data and $changeTime > (1.0 * self::BUF_SECONDS) and $check) { // too long reading
 			$this->buf_adjusted['over'] = true;
+			// адаптивная подстройка буфера
+			$adaptiveBuffer and $this->bufferSize += 150;
 		}
 		if ($check) {
 			$this->buf_adjusted['lastcheck'] = time();
 		}
 
+		// итого, имея период наличия данных и их отсутствия, 
+		if ($adaptiveBuffer and $this->buf_adjusted['state1time']) {
+			$coeff = $this->buf_adjusted['state1time'] / self::BUF_SECONDS;
+			if (!$data) {
+				// здесь принимается решение подпихнуть символ вместо данных
+				// развитие алгоритма: вместо случайного символа - расходуем буфер FIFO
+				// если конечно он есть
+				if ($check and !$this->buf_adjusted['state'] and $changeTime > 20) {
+					// тут была подстановка в data фейкового байта
+				}
+			}
+			// буфер правим только при переходе "есть - нет"
+			if ($statechange and !$this->buf_adjusted['state'] and
+				!$this->buf_adjusted['over']) {
+				// внимание со степенью: должна быть нечетной, чтобы не потерять знак
+				$delta = round(-($this->bufferSize * self::BUF_DELTA_PRC / 100) 
+					* pow(2 * (1 - $coeff), 3));
+				$this->bufferSize += $delta;
+				if ($this->bufferSize > self::BUF_MAX) {
+					$this->bufferSize = self::BUF_MAX;
+				}
+				else if ($this->bufferSize < self::BUF_MIN) {
+					$this->bufferSize = self::BUF_MIN;
+				}
+				$adjusted = array('delta' => $delta, 'buf' => $this->bufferSize);
+			}
+		}
 		if ($statechange) {
 			$this->buf_adjusted['over'] = false;
 		}
 		// HACK нафиг всю эту подстройку буфера
-		$this->bufferSize = self::BUF_READ;
+		$adaptiveBuffer or $this->bufferSize = self::BUF_READ;
 	}
 
 	public function setTTVCredentials($login, $pw) {
