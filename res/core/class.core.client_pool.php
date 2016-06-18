@@ -3,14 +3,20 @@
 class ClientPool {
 	const MASTERSOCKET = '_master';
 
+	protected $port;
 	protected $socket;
 	protected $clients = array(); // объекты клиентов
 
 	public function __construct($ip = '0.0.0.0', $port = 8000) {
-		$this->socket = stream_socket_server(sprintf("tcp://%s:%d", $ip, $port), $errno, $errstr);
+		$this->port = $port;
+		$this->socket = stream_socket_server(sprintf("tcp://%s:%d", $ip, $this->port), $errno, $errstr);
 		if (!$this->socket) {
 			throw new Exception("Failed to create socket server. $errstr", $errno);
 		}
+	}
+
+	public function getPort() {
+		return $this->port;
 	}
 
 	public function getClients() {
@@ -67,7 +73,7 @@ class ClientPool {
 				$doneclients[$peer] = null;
 				// ассоциированные трансляции должны удалиться через __destruct клиента
 				// тут можно разве что в лог написать
-				error_log('disconnected ' . $peer);
+				# error_log('disconnected ' . $peer);
 
 				if (in_array($e->getCode(), array(3, 4))) {
 					$recheck = true;
@@ -82,7 +88,7 @@ class ClientPool {
 			// а мы после этого только пишем, что он приконнектился
 			// еще одна мелкая эстетическая проблемка. когда клиент рвет соединение и тут же создает новое 
 			// в логе пишется сначала connected для нового. затем disconnected для старого коннекта
-			error_log('connected ' . $peer);
+			# error_log('connected ' . $peer);
 			$this->clients[$peer] = new StreamClient($peer, $conn);
 			$newclients[$peer] = null;
 		}
@@ -94,11 +100,6 @@ class ClientPool {
 			'start' => $startreq
 		);
 	}
-
 }
-
-
-
-
 
 

@@ -24,7 +24,6 @@ class StreamClient {
 		stream_set_blocking($this->socket, 0);
 		stream_set_timeout($this->socket, 0, 20000);
 		$this->tsconnected = time();
-		# error_log('construct client ' . spl_object_hash ($this));
 	}
 
 	public function getIp() {
@@ -84,8 +83,10 @@ class StreamClient {
 		$this->stream = $stream;
 	}
 
+
 	public function accept($headers, $pointer = 0, $pointerPos = 0) {
 		if ($this->isAccepted()) { // клиент уже получил заголовки, пропускаем
+			error_log('already accepted!! why again???');
 			return;
 		}
 		$this->pointer = 0;
@@ -103,9 +104,6 @@ class StreamClient {
 		return $this->isAccepted;
 	}
 
-	public function copy($src_res, $buf) {
-		return stream_copy_to_stream ($src_res, $this->socket, $buf);
-	}
 	// затея: сюда передается большой буфер из StreamUnit. мы храним указатель и самостоятельно берем нужную часть
 	// bufSize - сколько клиент должен себе забрать
 	public function put(&$data, $bufSize = null) {
@@ -121,6 +119,7 @@ class StreamClient {
 		if ($writeWhole) {
 			$bufSize = $dataLen;
 			$correctPointer = false;
+			//	error_log('put on client ' . $data);
 		}
 		// сразу обновим указатель в %
 		$this->pointerPos = $dataLen ? round($this->pointer / $dataLen * 100) : 0; // и его позиции в %
@@ -235,6 +234,7 @@ class StreamClient {
 		} else if ($sock_data === FALSE) {
 			throw new Exception('Something bad happened', 2);
 		}
+
 		// TODO тут надо читать HTTP запрос целиком, до тех пор, пока не встретится пустая строка
 		// таймаут? хз, может клиент сам отвалится если что.. ну или вводить тут конечный автомат
 		// если клиент начал что-то похожее на GET / передавать, 
@@ -248,8 +248,25 @@ class StreamClient {
 		// до пустой строки, и только потом из полученного делаем объект запроса
 
 		$this->raw_read .= $sock_data;
-		if (substr($this->raw_read, -4) != "\r\n\r\n") {
+
+		// для DLNA нужно уметь обрабатывать POST-запросы. если запрос POST, ждем появления двойного переноса строк и
+		// контента длиной Content-Length байт. значение смотрим в заголовке
+		if (!preg_match('~HTTP/1\..*\r?\n\r?\n(.*)~sm', $this->raw_read, $content)) {
 			return false;
+		}
+
+		$isPost = substr($this->raw_read, 0, 4) == 'POST';
+		// проконтролируем длину полученного контента
+		if ($isPost) {
+			$contentLength = null;
+			preg_match('~Content-Length: (\d+)~i', $this->raw_read, $m);
+			$contentLength = $m[1];
+			$content = $content[1];
+			$allDataGot = (!$contentLength or strlen($content) == $contentLength);
+			if (!$allDataGot) {
+				error_log('PARTIAL POST DATA ' . strlen($content) . ' of ' . $contentLength);
+				return false;
+			}
 		}
 
 		// далее предстоит реализация перемотки кино
@@ -325,291 +342,6 @@ class StreamClient {
 	}
 }
 
-// пример ссылки, по которой может прийти клиент
-// http://sci-smart.ru:8000/pid/43b12325cd848b7513c42bd265a62e89f635ab08/Russia24
-class ClientRequest {
-	protected $start; // сюда запишем, что клиент запросил
-	protected $req;
-	protected $client;
 
-	public function __construct($data, $client) {
-		#error_log('client send: ' . $data);
-		$this->req = $data;
-		$this->client = $client;
-		$this->start = $this->parse($this->req);
-		# error_log('construct request ' . spl_object_hash ($this));
-	}
-	public function getName() {
-		return $this->start['uriName'];
-	}
-	public function getPid() {
-		return $this->start['uriAddr'];
-	}
-	// возвращает тип запрошенного контента, acelive, trid, pid, torrent, file
-	public function getType() {
-		return $this->start['uriType'];
-	}
-	public function getContent() {
-		return $this->start['content'];
-	}
-	public function getClient() {
-		return $this->client;
-	}
-	public function getHeaders() {
-		return $this->req;
-	}
-	public function getUri() {
-		return $this->start['reqUri'];
-	}
 
-	public function getReqType() {
-		return $this->start['reqType'];
-	}
-	public function isRanged() {
-		return !is_null($this->start['range']);
-	}
-	public function isEmptyRanged() {
-		return $this->start['range'] === array('from' => 0, 'to' => 0);
-	}
-	public function getReqRange() {
-		return $this->start['range'];
-	}
-	public function getHttpHost($withPort = true) { // TODO withPort=false
-		return $this->start['reqHost'];
-	}
-
-	// TODO тут не дб логики обработки и кидания исключений
-	// только разбор заголовков и выдача их в удобном виде
-	// а кто чего попросил запустить это в acePHP.php стоит решать
-	protected function parse($sock_data) {
-		$firstLine = trim(substr($sock_data, 0, strpos($sock_data, "\n")));
-		$result = array(
-			'reqType' => substr($firstLine, 0, $space = strpos($firstLine, ' ')), // от начала до первого пробела
-			'reqUri' => substr($firstLine, $space + 1, ($rspace = strrpos($firstLine, ' ')) - $space - 1),
-			'reqProto' => substr($firstLine, $rspace + 1),
-			'range' => preg_match('~Range: bytes=(\d+)-(\d+)?~sm', $sock_data, $m) ? 
-				array('from' => $m[1], 'to' => @$m[2]) : null,
-			'reqHost' => preg_match('~host: ([^\s]*)~smi', $sock_data, $m) ? 
-				$m[1] : null,
-		);
-
-		// немного дополним инфо о запросе, разобрав reqUri
-		// обычно запрос состоит из 3 частей: тип, адрес и название. /pid/blablabla/name
-		$uriInfo = array();
-		$uri = $result['reqUri'];
-		$tmp = explode('/', $uri);
-		$uriInfo['uriType'] = $tmp[1]; // между первым и вторым слешами
-		$uriInfo['uriAddr'] = urldecode($tmp[2]);
-		// название торрента - необязательный параметр. скоро через LOADASYNC получать будем
-		$uriInfo['uriName'] = isset($tmp[3]) ? urldecode($tmp[3]) : '';
-
-		// types:
-		// pid - start by PID
-		// acelive, trid - start by translation ID (http://torrent-tv.ru/torrent-online.php?translation=?)
-		// torrent - start torrent file
-
-		// такая штука. если клиент медленный, он может выдать GET запрос за первый проход,
-		// а остальные хедеры за последующие. в связи с чем по первому принятому запросу
-		// запускаем поток, а по следующему кидаем этот эксепшен и клиента кикает
-		// upd: жду от клиента полных заголовков, и только потом обрабатываю. вернул исключенеи
-		#throw new Exception('Unknown request', 15);
-		return $result + $uriInfo;
-	}
-	public function __destruct() {
-		# error_log(' destruct request ' . spl_object_hash ($this));
-	}
-}
-
-abstract class ClientResponse {
-	protected $req;
-	protected $client;
-
-	static function createResponse(ClientRequest $req) {
-		// для пробивочного запроса выдаем заголовки и закрываем коннект
-		if ($req->getReqType() == 'HEAD' or ($req->isRanged() and $req->isEmptyRanged())) {
-			return new ClientResponseHead($req);
-		}
-
-		$type = $req->getType();
-		// для запроса плейлиста тоже отрабатываем коротким ответом
-		// выдадим в качестве плейлиста список .torrent файлов из папки /STORAGE/FILES
-		if ($type == 'playlist') {
-			return new ClientResponsePlaylist($req);
-		}
-
-		$pid = $req->getPid();
-		$name = $req->getName();
-
-		switch ($type) {
-			case 'file':
-			case 'pid':
-			case 'trid':
-			case 'acelive':
-			case 'torrent':
-			case 'tracker':
-				break;
-			default:
-				// сервим как http запрос файла
-				return new ClientResponseFile($req);
-				# throw new Exception('Unknown request type');
-		}
-
-		return new ClientResponseStream($req);
-	}
-
-	public function __construct(ClientRequest $req) {
-		$this->req = $req;
-		$this->client = $this->req->getClient();
-		# error_log('construct response ' . spl_object_hash ($this));
-	}
-	public function __destruct() {
-		# error_log(' destruct response ' . spl_object_hash ($this));
-	}
-
-	public function isStream() {
-		return false;
-	}
-	abstract public function response();
-}
-
-class ClientResponseStream extends ClientResponse {
-	public function isStream() {
-		return true;
-	}
-	public function response() {
-	}
-}
-
-class ClientResponseHead extends ClientResponse {
-	public function response() {
-		$response = 'HTTP/1.1 200 OK' . "\r\n" .
-			'Accept-Ranges: bytes' . "\r\n\r\n";
-		$this->client->put($response);
-		return $this->client->close();
-	}
-}
-
-class ClientResponsePlaylist extends ClientResponse {
-	// выдает список торрентов из папки
-	// если торрент из нескольких видеофайлов - выдаем его как плейлист
-	public function response() {
-		$req = $this->req;
-		$playlist = array();
-
-		$curFile = $req->getPid();
-		if (substr($curFile, -12) !== '.torrent.m3u') { // интересуют только торренты
-			$curFile = null;
-		} else {
-			// xbmc не воспринимает содержимое как плейлист без расширения m3u
-			// может еще удастся поиграть и настроить через хедеры или mime
-			$curFile = substr($curFile, 0, -4);
-		}
-
-		$basedir = '/STORAGE/FILES/';
-		$hostport = $req->getHttpHost(true); // true - с портом через двоеточие, если тот есть
-		$lib_loaded = class_exists('BDecode');
-		// это запрос на чтение содержимого торрент-файла
-		if ($lib_loaded and is_file($path = ($basedir . $curFile))) {
-			$torrent = new BDecode($path);
-			$files = $torrent->result['info']['files'];
-			foreach ($files as $idx => $one) {
-				$name = implode('/', $one['path']);
-				// TODO hostname брать из запроса
-				$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-					'http://' . $hostport . '/torrent/' . $curFile . '/' . $idx . "\r\n";
-			}
-		} else {
-			$torList = glob($basedir . '*.torrent');
-			foreach ($torList as $one) {
-				$basename = basename($one);
-				$name = str_replace('.torrent', '', $basename);
-
-				$isMultifiled = false;
-				// попробуем декодировать торрент и получить некоторое инфо
-				if ($lib_loaded) {
-					$torrent = new BDecode($one);
-					if (isset($torrent->result['info']['name'])) {
-						$name = $torrent->result['info']['name'];
-					}
-					$files = isset($torrent->result['info']['files']) ? 
-						$torrent->result['info']['files'] : array();
-					$count = count($files);
-					foreach ($files as $f) {
-						// отсеем всякие сопутствующие фильмам файлы
-						$tmp = implode('/', $f['path']);
-						if (in_array(substr($tmp, -4), array('.srt', '.ac3'))) {
-							$count--;
-						}
-					}
-					if ($count > 1) {
-						$isMultifiled = true;
-					}
-				}
-
-				// принимаем решение, запускать файл или выдавать как плейлист
-				// TODO hostname брать из запроса
-				if ($isMultifiled) {
-					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-						'http://' . $hostport . '/playlist/' . $basename . '.m3u' . "\r\n";
-				} else {
-					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-						'http://' . $hostport . '/torrent/' . $basename . "\r\n";
-				}
-			}
-		}
-		/*
-					$source_url = isset($torrent->result['publisher-url']) ? 
-						$torrent->result['publisher-url'] : $torrent->result['comment'];
-					$source = isset($torrent->result['publisher']) ? $torrent->result['publisher'] : null;
-					$files = $torrent->result['info']['files'];
-					//file_put_contents('torrents', json_encode($torrent->result) . PHP_EOL, FILE_APPEND);
-					#error_log($name . ' => ' . $source);
-					#error_log($source_url);
-				if ($basename == 'Z Nation 1 - LostFilm.TV [1080p].torrent' and $torrent) {
-					$info = $torrent->result['info'];
-					unset($info['pieces']);
-					error_log(var_export($info, 1));
-				}
-
-		 */
-
-		ksort($playlist);
-		$playlist =  '#EXTM3U' . "\r\n" . implode("\r\n", $playlist);
-
-		$response = 'HTTP/1.1 200 OK' . "\r\n" .
-			'Connection: close' . "\r\n" .
-			'Content-Type: text/plain' . "\r\n" .
-			'Content-Length: ' . strlen($playlist) . "\r\n" .
-			'Accept-Ranges: bytes' . "\r\n\r\n" .
-			$playlist;
-		$this->client->put($response);
-		return $this->client->close();
-	}
-}
-
-class ClientResponseFile extends ClientResponse {
-	public function response() {
-		$req = $this->req;
-		$root = '/STORAGE/FILES/';
-		$filepath = $root . $req->getUri();
-
-		$contents = '';
-		if (!is_file($filepath)) {
-			$response = 'HTTP/1.1 404 Not Found' . "\r\n" .
-				'Connection: close' . "\r\n" .
-				"\r\n";
-		} else {
-			$contents = file_get_contents($filepath);
-			$response = 'HTTP/1.1 200 OK' . "\r\n" .
-				'Connection: close' . "\r\n" .
-				'Content-Type: text/plain' . "\r\n" .
-				'Content-Length: ' . strlen($contents) . "\r\n" .
-				'Accept-Ranges: bytes' . "\r\n" .
-				"\r\n" .
-				$contents;
-		}
-		$this->client->put($response);
-		return $this->client->close();
-	}
-}
 
