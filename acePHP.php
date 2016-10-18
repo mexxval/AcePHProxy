@@ -51,6 +51,8 @@
 //		+ State-Machine обработчик запросов: пробивка сервера (HEAD,OPTIONS), NowPlaying/Recently Played, запуск видео
 //		различные классы трасляций (расширение StreamUnit: запуск файлов, торрентов, live, rtsp),
 //		расширение класса клиента (XBMC/обычный, на XBMC уведомления слать например)
+// искоренить состояние chk, удалять кэш например, оно мертвого достанет
+// кэшировать все видео, а не только последнее
 
 
 // BUGS
@@ -82,185 +84,63 @@
 //		[пробовал подсунуть такой torrent, ace его не ест. говорит "announce, nodes and announce-list missing"]
 // - TODO все хранить на стороне софта, список каналов, папка с торрентами. оформить как подключаемые модули
 //		можно подключить разные сайты, torrent-tv.ru, yify-torrent.org, eztv, etc
-
-define('ACEPHPROXY_VERSION', '0.6.5');
-
-require_once dirname(__FILE__) . '/class.bdecode.php';
-require_once dirname(__FILE__) . '/class.client_pool.php';
-require_once dirname(__FILE__) . '/class.stream_client.php';
-require_once dirname(__FILE__) . '/class.stream_unit.php';
-require_once dirname(__FILE__) . '/class.ace_connect.php';
-require_once dirname(__FILE__) . '/class.ncurses_ui.php';
-require_once dirname(__FILE__) . '/class.streams_mgr.php';
-
-mb_internal_encoding('UTF-8');
-
-// создаем коннект к acestream, запускаем клиентский сокет
-// изначально был этот ключ
-$key = 'n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE';
+// - TODO playlist и элементы не отмечаются в XBMC как просмотренные, также хорошо бы им длительность указать
 
 
+# еще одно торрент-тв, открывать через анонимайзер
+# http://torrentstream.tv/browse-znanie-videos-1-date.html
 
-// создает сокет сервера трансляций и управляет коннектами клиентов к демону
-$pool = new ClientPool('0.0.0.0', $PORT = 8000);
-// получает PID и выдает ссылку на трансляцию
-$ace = new AceConnect($key);
+require_once dirname(__FILE__) . '/res/init.php';
 
-// управляет трансляциями. заказывает их у Ace и раздает клиентам из pool
-$streams = new StreamsManager($ace, $pool);
-
-// при рефакторинге роль совершенно изменилась и не соответствует имени класса
-// занимается отрисовкой ncurses интерфейса
-$EVENTS = new EventController;
-$EVENTS->init();
+$App = AcePHProxy::getInstance();
 
 // мониторим новых клиентов, запускаем для них трансляцию или, если такая запущена, копируем данные из нее
 // мониторим дисконнекты и убиваем трансляцию, если клиентов больше нет (пока можно сделать ее вечноживой)
 // мониторим проблемы с трансляцией и делаем попытку ее перезапустить в случае чего
-
-$last_check = 0;
-$ctrlC = false;
-$STARTEDTS = time();
-
-if (!function_exists('pcntl_signal')) {
-	$EVENTS->error('pcntl function not found. Ctrl+C will not work properly');
-}
-else {
-	$EVENTS->log('Setting up Ctrl+C', EventController::CLR_GREEN);
-
-	declare(ticks=1000);
-	function signalHandler() {
-		global $ctrlC, $EVENTS;
-		$ctrlC = true;
-		$EVENTS->error('Ctrl+C caught. Exiting');
-	}
-	pcntl_signal(SIGINT, 'signalHandler');
+while (!$App->isCtrlC_Occured()) {
+	$App->tick();
+	// увеличение с 20 до 100мс улучшило ситуацию с переполнением клиентских сокетов
+	usleep(50000);
 }
 
 
-while (!$ctrlC) {
-	$check_inet = (time() - $last_check) > 10; // every N sec
-	try {
-		if ($check_inet) {
-			$wwwOK = $EVENTS->checkWWW($wwwChanged);
-			$last_check = time();
-			if ($wwwChanged) {
-				$pool->notify(($wwwOK ? 'Интернет восстановлен' : 'Интернет упал'));
-			}
-		}
 
-		// получаем статистику по новым клиентам, отвалившимся клиентам и запросам на запуск трансляций
-		if ($new = $pool->track4new()) {
-			foreach ($new['start'] as $peer => $req) {
-				try {
-					$streams->start($req);
-				}
-				catch (Exception $e) {
-					$client = $req->getClient();
-					$client->close();
-					$client->notify('Start error: ' . $e->getMessage(), 'error');
-					error_log('unset client on start error');
-					$EVENTS->error($e->getMessage());
-				}
-			}
-			unset($info, $req, $client); // обязательно. ибо лишние object-ссылки
-
-			foreach ($new['new'] as $peer => $_) {
-			}
-			foreach ($new['done'] as $peer => $_) {
-			}
-
-			// быстренько валим на новый цикл
-			if ($new['recheck']) {
-				continue;
-			}
-		}
+// AceProxy на кривой урл не выдает понятного для XBMC ответа, тот повторяет попытки открыть урл
+// m3u открывается долго, потому как XBMC делает по 2 инфо-запроса: HEAD и Range:0-0, на что тоже не получает внятного ответа
+// из-за 2 причин выше остановка потока не отрабатывает нормально (висит, пока не пройдут запросы по всем эл-там плейлиста)
+// ссылка критична к /stream.mp4 на хвосте ссылки (/pid/<pid>/stream.mp4)
+// для трансляции одного потока на несколько клиентов требует VLC
+// при нажатии на эл-т плейлиста XBMC замирает секунды на 3-4, затем идет Подождите, потом только пойдет видео
+// иногда, нажав на стоп в момент затыка, приходится долго ждать, пока пойдут данные, чтобы XBMC отвис
 
 
-		// раскидываем контент по клиентам
-		$streams->closeWaitingStreams();
-		$streams->copyContents();
+// несколько замеров времени старта. рестарт производился методом остановки работающего потока и немедленного запуска снова
+// каждый замер длился около 1.5-2 мин
+//				  клик .. Подождите .. открытие видео .. пошел звук .. 1-я буф-я старт .. финиш .. обрыв .. время рестарта
+// AceProxy	VLC	: 0			5				12				12						50		-		78			22
+// videotimeout : 0			4				12				12						16		-		да			28
+// 20sec		: 0			5				-				-						-		-		30			23
+//				: 0			5				13				13						49		-		78			20
+//				: 0			5				13				13						55		-		80			23
 
-		// задача - собрать массив трансляций
-		$channels = array();
-		$allStreams = $streams->getStreams();
+// AceProxy		: 0			5				12				12						41		45		-			11
+//				: 0			5				13				13						-		-		-			21
+//				: 0			5				11				11						43		48		-			11
+//				: 0			5				11				11						42		46		-			27 не стартануло
+//				: 0			5				12				12						42		45		-			23
 
-		// собираем инфу для вывода в UI
-		foreach ($allStreams as $pid => $one) {
-			$stats = $one->getStatistics();
-			$isRest = $one->isRestarting();
-			$bufColor = EventController::CLR_GREEN;
-			$titleColor = EventController::CLR_DEFAULT;
-			if ($isRest) {
-				$bufColor = EventController::CLR_SPEC1;
-				$titleColor = EventController::CLR_ERROR;
-			}
-			else if (@$stats['emptydata']) {
-				$bufColor = EventController::CLR_ERROR;
-			}
-			else if (@$stats['shortdata']) {
-				$bufColor = EventController::CLR_YELLOW;
-			}
+// AcePHProxy	: 0			0				4				5						31		46		-			3
+//				: 0			0				4				4						53		67		-			20
+//				: 0			0				4				4						49		62		-			2
+//				: 0			0				5				5						26		42		-			21
+//				: 0			0				5				5						54		68		-			19
 
-			$bufLen = round($one->getBufferedLength() / 1024 / 1024) . ' Mb';
-			// показываем поочередно размер буфера чтения и размер прочитанного внутреннего буфера
-			$buf = time() % 2 ? $one->getBufferSize() : $bufLen;
-			$s = iconv('cp866', 'utf8', chr(249)); // значок заполнитель
-			$tmp = array(
-				// если вместо строки массив: 0 - цвет, 1 - выводимая строка
-				0 => array(0 => $titleColor, 1 => $one->getName()),
-				1 => array(0 => $bufColor, 1 => $buf),
-				2 => $one->getState(),
-				3 => @$stats['peers'],
-				4 => sprintf('%\'.-7d%\'.6d', @$stats['ul_bytes']/1024/1024, @$stats['dl_bytes']/1024/1024),
-				6 => sprintf('%\'.-6d%\'.6d', @$stats['speed_dn'],  @$stats['speed_up'])
-			);
-			$peers = $one->getPeers();
-			if (empty($peers)) {
-				$tmp[2] = 'close';
-				$channels[] = $tmp;
-			}
-			else {
-				foreach ($peers as $peer => $client) {
-					// выводим поочередно то клиента, то его статистику
-					// это поле размером 24 символа
-					$tmp[5] = round(time() / 0.6) % 2 ? 
-						sprintf('%s %d%%', $client->getName(), $client->getPointerPosition()) :
-						sprintf('%-13s %8s', $client->getUptime(), $client->getTraffic()) ;
-					$channels[] = $tmp;
-					$tmp = array(0 => '', '', '', '', '', '', '');
-				}
-			}
-		}
-		// это чтобы удалились все ссылки на объекты потока и клиента
-		unset($client);
-		unset($one);
-
-		// выведем аптайм и потребляемую память
-		$allsec = time() - $STARTEDTS;
-		$secs = sprintf('%02d', $allsec % 60);
-		$mins = sprintf('%02d', floor($allsec / 60 % 60));
-		$hours = sprintf('%02d', floor($allsec / 3600));
-		$mem = memory_get_usage(); // bytes
-		$mem = round($mem / (1024 * 1024), 1); // MBytes
-
-		$addinfo = array(
-			'ram' => $mem,
-			'uptime' => "$hours:$mins:$secs",
-			'title' => ' AcePHProxy v.' . ACEPHPROXY_VERSION . ' ',
-			'port' => $PORT
-		);
-		$EVENTS->tick($channels, $addinfo);
-		// увеличение с 20 до 100мс улучшило ситуацию с переполнением клиентских сокетов
-		usleep(30000);
-	}
-	catch (Exception $e) {
-		$EVENTS->error($e->getMessage());
-	}
-}
-
-// тормозим все трансляции, закрываем сокеты Ace
-$streams->closeAll();
-
+// после настройки параметров запуска AceStream Engine, запуск по PID, вместо trid. 3min на тест
+// AcePHProxy	: 0			0				3				3						-		- не было -			<1; 5
+//				: 0			0				3				3						-		- не было -			2
+//				: 0			0				2.5				2.5						-		- не было -			1; <1
+//			HD	: 0			0				3				3						-		- не было -			<1; <1
+//			HD	: 0			0				3.5				3.5						31		36		-			1
+// в последнем тесте было 6 пиров всего, может потому проскочила буферизация
 
 

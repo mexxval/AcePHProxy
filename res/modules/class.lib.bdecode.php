@@ -45,7 +45,6 @@
  *  See http://wiki.theory.org/BitTorrentSpecification for bittorrent specification
  */
 
-require_once dirname(__FILE__) . '/class.bencodelib.php';
 
     final class BDecode {
         private $content;            // string containing contents of file

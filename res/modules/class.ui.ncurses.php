@@ -1,20 +1,26 @@
 <?php
 
-class EventController {
-	const CLR_SPEC1 = 4;
-	const CLR_YELLOW = 3;
-	const CLR_GREEN = 2;
-	const CLR_ERROR = 1;
-	const CLR_DEFAULT = 7;
+
+class AppUI_NCurses extends AppUI_common {
 
 	protected $windows = array();
-	protected $www_ok = true;
 	protected $cur_x;
 	protected $cur_y;
 	protected $map = array();
 	protected $colwid = array(); // ширины столбцов
 
-	public function __construct() {
+	public function __destruct() {
+		$this->closeClean();
+	}
+
+	// только ради требований базового класса, обращений к модулю извне не предполагается
+	public function process(ClientRequest $req) {
+	}
+
+	public function init() {
+		if (!function_exists('ncurses_init')) {
+			throw new Exception('NCurses UI not available. check ncurses PHP extension installed');
+		}
 		// конфиг раскладки по колонкам
 		$this->colwid = array(
 			0 => 24, // channel (variable!)
@@ -25,17 +31,98 @@ class EventController {
 			25,	// Client list
 			12,	// download/upload speed
 		);
+		$this->initWindows();
 	}
 
-	public function __destruct() {
-		$this->closeClean();
+	// вызывать каждый цикл. выводим массив трансляций
+	public function draw() {
+		$addinfo = $this->getApp()->getUIAdditionalInfo();
+		$streams = $this->makePlainStreamsArray($this->getStreams());
+
+		ncurses_werase ($this->windows['stat']);
+		ncurses_wborder($this->windows['stat'], 0,0, 0,0, 0,0, 0,0);
+
+		$this->listen4resize();
+
+		if (isset($addinfo['title'])) {
+			$this->output('stat', 0, 2, $addinfo['title']);
+		}
+		if (isset($addinfo['port'])) {
+			$this->output('stat', 0, 25, sprintf(' Port %d ', $addinfo['port']));
+		}
+		if (isset($addinfo['ram'])) {
+			$this->output('stat', 0, 38, sprintf(' RAM: %s MB ', $addinfo['ram']));
+		}
+		if (isset($addinfo['uptime'])) {
+			$this->output('stat', 0, 54, sprintf(' Uptime %s ', $addinfo['uptime']));
+		}
+
+		$i = 1;
+		$map = $this->map;
+
+		// выводим все коннекты и трансляции
+		$this->outputCol('stat', $i, 0, "");
+		$this->outputCol('stat', $i, 1, "Buffer");
+		$this->outputCol('stat', $i, 2, "State");
+		$this->outputCol('stat', $i, 3, "Peers");
+		$this->outputCol('stat', $i, 4, "Up  (MB) Down");
+		$this->outputCol('stat', $i, 5, "Client");
+		$this->outputCol('stat', $i, 6, "DL (kbps) UL");
+		$i++;
+
+		foreach ($streams as $row) {
+			$i++;
+			foreach ($row as $colidx => $str) {
+				$this->outputCol('stat', $i, $colidx, $str);
+			}
+		}
+
+		// состояние инета
+		// ascii table http://www.linuxivr.com/c/week6/ascii_window.jpg
+		#iconv('cp866', 'utf8', chr(0xb4)),
+		#iconv('cp866', 'utf8', chr(0xc3))
+		$str = array(
+			0 => ($wwwok = !empty($addinfo['wwwok'])) ? self::CLR_GREEN : self::CLR_ERROR,
+			1 => sprintf(' %s ', $wwwok ? 'online' : 'offline')
+		);
+		$this->outputCol('stat', 0, 6, $str);
+
+		ncurses_wrefresh($this->windows['stat']);
+
+		// перерисуем окно лога, при ресайзе оно не обновляется
+		// TODO один хрен косяк
+		ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
+		ncurses_wrefresh($this->windows['log']);
 	}
+
+	public function log($msg, $color = self::CLR_DEFAULT) {
+		ncurses_getmaxyx ($this->windows['log'], $y, $x);
+		ncurses_getyx ($this->windows['log'], $cy, $cx); // cursor xy
+		if ($cy > $y - 3) {
+			ncurses_werase ($this->windows['log']);
+			ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
+			$cy = 0;
+		}
+		$msg = mb_substr($msg, 0, $x - 2);
+
+		$color and ncurses_wcolor_set($this->windows['log'], $color);
+		ncurses_mvwaddstr ($this->windows['log'], $cy + 1, 1, $msg);
+		ncurses_clrtoeol ();
+		$color and ncurses_wcolor_set($this->windows['log'], self::CLR_DEFAULT);
+
+		// никак скроллить не выходит
+		#ncurses_insdelln (1);
+		#ncurses_scrl (-2); // вообще 0 реакции
+		#ncurses_insertln ();
+		ncurses_wrefresh($this->windows['log']);
+	}
+
 	// закрывает сессию ncurses
 	protected function closeClean() {
 		ncurses_end(); // выходим из режима ncurses, чистим экран
 	}
 
-	public function init() {
+	private function initWindows() {
 		// начинаем с инициализации библиотеки
 		$ncurse = ncurses_init();
 		// используем весь экран
@@ -86,7 +173,7 @@ class EventController {
 		if ($x != $this->cur_x or $y != $this->cur_y) {
 			// restart ncurses session, redraw all
 			$this->closeClean();
-			$this->init();
+			$this->initWindows();
 		}
 
 		// save current main window size
@@ -118,64 +205,6 @@ class EventController {
 		ncurses_refresh(); // рисуем окна
 	}
 
-	// вызывать каждый цикл. выводим массив трансляций
-	public function tick($streams, $addinfo) {
-		ncurses_werase ($this->windows['stat']);
-		ncurses_wborder($this->windows['stat'], 0,0, 0,0, 0,0, 0,0);
-
-		$this->listen4resize();
-
-		if (isset($addinfo['title'])) {
-			$this->output('stat', 0, 2, $addinfo['title']);
-		}
-		if (isset($addinfo['port'])) {
-			$this->output('stat', 0, 25, sprintf(' Port %d ', $addinfo['port']));
-		}
-		if (isset($addinfo['ram'])) {
-			$this->output('stat', 0, 38, sprintf(' RAM: %s MB ', $addinfo['ram']));
-		}
-		if (isset($addinfo['uptime'])) {
-			$this->output('stat', 0, 54, sprintf(' Uptime %s ', $addinfo['uptime']));
-		}
-
-		$i = 1;
-		$map = $this->map;
-
-		// выводим все коннекты и трансляции
-		$this->outputCol('stat', $i, 0, "");
-		$this->outputCol('stat', $i, 1, "Buffer");
-		$this->outputCol('stat', $i, 2, "State");
-		$this->outputCol('stat', $i, 3, "Peers");
-		$this->outputCol('stat', $i, 4, "Up  (MB) Down");
-		$this->outputCol('stat', $i, 5, "Client");
-		$this->outputCol('stat', $i, 6, "DL (kbps) UL");
-		$i++;
-
-		foreach ($streams as $row) {
-			$i++;
-			foreach ($row as $colidx => $str) {
-				$this->outputCol('stat', $i, $colidx, $str);
-			}
-		}
-
-		// состояние инета
-		// ascii table http://www.linuxivr.com/c/week6/ascii_window.jpg
-		#iconv('cp866', 'utf8', chr(0xb4)),
-		#iconv('cp866', 'utf8', chr(0xc3))
-		$str = array(
-			0 => $this->www_ok ? EventController::CLR_GREEN : EventController::CLR_ERROR,
-			1 => sprintf(' %s ', $this->www_ok ? 'online' : 'offline')
-		);
-		$this->outputCol('stat', 0, 6, $str);
-
-		ncurses_wrefresh($this->windows['stat']);
-
-		// перерисуем окно лога, при ресайзе оно не обновляется
-		// TODO один хрен косяк
-		ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
-		ncurses_wrefresh($this->windows['log']);
-	}
-
 	protected function outputCol($wcode, $y, $col, $str) {
 		$x = $this->map[$col];
 		$maxwid = $this->colwid[$col];
@@ -199,45 +228,6 @@ class EventController {
 		$color and ncurses_wcolor_set($w, $color);
 		ncurses_mvwaddstr($w, $y, $x, $str);
 		$color and ncurses_wcolor_set($w, self::CLR_DEFAULT);
-	}
-
-	// а еще чтобы не долбить коннектами, можно его куда нить открыть и держать. 
-	// опыт xbmc клиента правда говорит, что это мб весьма ненадежно.. зато реалтайм
-	public function checkWWW(&$changed) {
-		// делаем 2-3 попытки коннекта для проверки инета
-		$cyc = 3;
-		while (!($fp = @stream_socket_client('tcp://8.8.8.8:53', $e, $e, 0.15, STREAM_CLIENT_CONNECT)) and $cyc-- > 0);
-
-		$tmp = $this->www_ok; // для определения смены состояния
-		$this->www_ok = $fp ? true : false;
-		$changed = $tmp != $this->www_ok;
-		$fp and fclose($fp);
-		return $this->www_ok;
-	}
-
-	public function log($msg, $color = self::CLR_DEFAULT) {
-		ncurses_getmaxyx ($this->windows['log'], $y, $x);
-		ncurses_getyx ($this->windows['log'], $cy, $cx); // cursor xy
-		if ($cy > $y - 3) {
-			ncurses_werase ($this->windows['log']);
-			ncurses_wborder($this->windows['log'], 0,0, 0,0, 0,0, 0,0);
-			$cy = 0;
-		}
-		$msg = mb_substr($msg, 0, $x - 2);
-
-		$color and ncurses_wcolor_set($this->windows['log'], $color);
-		ncurses_mvwaddstr ($this->windows['log'], $cy + 1, 1, $msg);
-		ncurses_clrtoeol ();
-		$color and ncurses_wcolor_set($this->windows['log'], self::CLR_DEFAULT);
-
-		// никак скроллить не выходит
-		#ncurses_insdelln (1);
-		#ncurses_scrl (-2); // вообще 0 реакции
-		#ncurses_insertln ();
-		ncurses_wrefresh($this->windows['log']);
-	}
-	public function error($msg) {
-		return $this->log($msg, self::CLR_ERROR);
 	}
 }
 

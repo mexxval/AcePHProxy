@@ -1,0 +1,22 @@
+{
+	"buffers":
+	{
+		"223":256000
+	},
+	"listen_ip": "0.0.0.0",
+	"listen_port": "8001",
+	"stream_keepalive_sec": "5",
+	"ui": ["ncurses", "websocket"],
+
+	"ttv":
+	{
+		"acestreamkey": "n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE",
+		"ttv_login":"",
+		"ttv_psw":""
+	},
+	"torrent":
+	{
+		"acestreamkey": "n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE",
+		"basedir": "/STORAGE/FILES/"
+	}
+}
