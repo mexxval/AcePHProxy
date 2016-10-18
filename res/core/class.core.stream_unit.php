@@ -39,7 +39,7 @@ class StreamUnit {
 	protected $finished = false; // выставляется в true когда отключается последний клиент
 	protected $stopReading = false;
 
-	public function __construct($conn) {
+	public function __construct(AppStreamResource $conn) {
 		$this->cur_conn = $conn; // КЛАСС источника потока, у него там тоже конечный автомат есть
 		$this->cur_conn->registerEventListener(array($this, 'connectionListener'));
 		$this->state = self::STATE_IDLE;
@@ -81,6 +81,7 @@ class StreamUnit {
 		$this->state = self::STATE_STARTING;
 		$this->startTime = time();
 		$this->waitSec = 30; // cycles ~ seconds
+		$this->cur_conn->open();
 	}
 
 	public function __destruct() {
@@ -89,16 +90,19 @@ class StreamUnit {
 
 	public function close() {
 		// вообще по идее при уничтожении объекта будут вызваны __destruct и всех вложенных
-		foreach ($this->clients as $idx => $one) {
-			// почему было закомментировано закрытие клиентов?
-			$one->close();
-			unset($this->clients[$idx]); // может из-за unset?
-			// в __destruct у клиента нет кода самозакрытия, так что раскомментировал
-			// не работал сброс клиента при Failed to get link, помогло
+		foreach ($this->clients as $peer => $one) {
+			$this->dropClientByPeer($peer);
 		}
 		$this->closeStream();
 		$this->finished = true;
 		$this->state = self::STATE_IDLE;
+	}
+	private function dropClientByPeer($peer) {
+		// почему было закомментировано закрытие клиентов?
+		$this->clients[$peer]->close();
+		unset($this->clients[$peer]); // может из-за unset?
+		// в __destruct у клиента нет кода самозакрытия, так что раскомментировал
+		// не работал сброс клиента при Failed to get link, помогло
 	}
 
 	public function unfinish() {
@@ -114,7 +118,10 @@ class StreamUnit {
 	}
 
 	protected function closeStream() {
-		return $this->cur_conn and $this->cur_conn->close();
+		isset($this->cur_conn) and $this->cur_conn->close();
+		// например для плагина вебсервера объект файла закрывался, но не удалялся.
+		// а в нем ссылка на этот объект StreamUnit (через registerEventListener)
+		unset($this->cur_conn);
 	}
 
 	public function getStatistics() {
@@ -175,7 +182,9 @@ class StreamUnit {
 	}
 
 	public function getName() {
-		return $this->cur_conn->getName();
+		// в случае failed to start stream объекта потока может не быть
+		// и тогда тут будет фатал
+		return isset($this->cur_conn) ? $this->cur_conn->getName() : null;
 	}
 
 	public function getClients() { // alias
@@ -212,16 +221,20 @@ class StreamUnit {
 
 		// движок говорит, что поток остановлен (бывает при ошибке Cannot load transport file)
 		if (!empty($stats['eof'])) {
-			$this->close();
+			# $this->close();
+			$this->finished = true; // через флаг лучше. parent-объект нас потом сам закроет
+			# error_log('Event: stream resource eof');
 		}
 		// вообще этот метод дергается только при наличии ответа от Ace, а если тот будет молчать, можем застрять
 		else if ($this->state == self::STATE_STARTING and !empty($stats['started'])) {
 			$this->state = self::STATE_STARTED;
 			$this->isLive = $this->cur_conn->isLive();
+			#error_log('Event: stream resource ready, isLive=' . ($this->isLive ? 'true' : 'false'));
 		}
 
 		if (!empty($stats['headers'])) { // готовы хедеры в ответ на запрос пользователя, отдаем
 			// поток открыт, пора всех клиентов оповестить и раздать им заголовки
+			#error_log('Event: Accepting all clients on stream start');
 			foreach ($this->getClients() as $c) {
 				// отправляем хттп заголовки ОК
 				$c->accept($stats['headers']);
@@ -229,13 +242,15 @@ class StreamUnit {
 		}
 	}
 
+	// TODO рефаккттоориииить
 	public function registerClient(StreamClient $client) {
-		if (!$this->isLive) {
-			// предыдущих клиентов надо скинуть, иначе новый диапазон байт будет при 
+		if (!$this->isLive) { // типа кино
+			// предыдущих клиентов надо скинуть, иначе новый диапазон байт будет при
 			// прочтении записан на них тоже. надо только на последнего подключившегося
 			// может это логичнее при openStream делать?
-			foreach ($this->getClients() as $one) {
-				$one->close();
+			# error_log('Drop all clients except new one');
+			foreach ($this->getClients() as $peer => $one) {
+				$this->dropClientByPeer($peer);
 			}
 			$this->unfinish();
 			$this->buffer = '';
@@ -244,24 +259,28 @@ class StreamUnit {
 		$peer = $client->getName();
 		$this->clients[$peer] = $client;
 		$client->associateStream($this);
+		$headers = $this->cur_conn->getStreamHeaders(true);
 
 		if ($this->isLive) {
 			// если поток уже открыт и воспроизводится, то похоже это дополнительные клиенты
-			// надо им отослать заголовки! а то внезапно оказалось, что более 1 клиента на одну 
+			// надо им отослать заголовки! а то внезапно оказалось, что более 1 клиента на одну
 			// трансляцию перестало обслуживаться
 			// для Live-режима заголовки те же самые, одинаковые для всех
 			// для просмотра торрентов отдельная песня. там разные Range: bytes должны быть
-			if ($this->isRunning())	{
+			if ($this->isRunning()) {
 				// попробуем решить проблему отвала VLC по negative counter таким способом:
 				// нового клиента цепляем на середину буфера
-				$pointerPos = 50;
-				$pointer = round(strlen($this->buffer) * $pointerPos / 100);
-				$headers = $this->cur_conn->getStreamHeaders(true);
+				list($pointerPos, $pointer) = $this->getMiddlePointerPosition();
+				# error_log('Accept client on ' . $pointerPos . '%');
 				$client->accept($headers, $pointer, $pointerPos);
 			}
 			return;
 		}
 
+		// далее идет логика для режима Кино (не лайв поток)
+		// для режима кино обязательно вырубаем ecoMode, иначе просто не будет работать
+		// т.к. для работы перемотки плееры делают несколько мелких запросов, а ecoMode
+		// из-за этого отдает данные по 1 байту
 		$client->setEcoMode(false);
 		// сбросим метку начала старта, чтобы не кикнуло раньше времени
 		$this->startTime = time();
@@ -271,14 +290,54 @@ class StreamUnit {
 		if (!$this->isRunning()) {
 			return;
 		}
+
+		// вебсокеты открываются быстро, и сразу отправляют уведомление с headers,
+		// но клиент еще не ассоциирован и не получает его. правильнее каждому новому клиенту
+		// при регистрации сразу давать заголовки, если они готовы
+		// upd: снова косяк. теперь кино глючит. первый коннект получает хедеры,
+		// затем идет следующий коннект с новым range, но хедеры еще не обновились (поток не переоткрылся)
+		// и клиент тут принимается со старыми заголовками..
+
 		$req = $client->getLastRequest();
+		// TODO хотелось бы все же, чтобы у каждого клиента был определен минимум 1 запрос, 
+		// с которым он пришел. иначе нефига ему в этом методе делать
 		if ($req->isRanged()) {
 			$range = $req->getReqRange();
 			$this->cur_conn->seek($range['from']);
 			error_log('Seek to ' . $range['from']);
-		} else {
-			error_log('Cannot seek, expected ranged request');
 		}
+
+		$headers = $this->cur_conn->getStreamHeaders(true);
+		if ($headers) {
+			$client->accept($headers);
+		}
+	}
+
+	// если транслируем неразобранный chunked-поток, надо позицию искать так,
+	// чтобы данные для клиента начинались с длины чанка, как положено
+	// иначе пофиг, просто берем 50%
+	private function getMiddlePointerPosition() {
+		$isChunkedStream = $this->isChunkedStream();
+		if ($isChunkedStream) {
+			$offset = strlen($this->buffer) / 2;
+			$found = preg_match('~(?:\r?\n|^)([0-9a-f]{3,8})\r?\n~smU', $this->buffer, $m, PREG_OFFSET_CAPTURE, $offset);
+			if (!$found or !isset($m[1][1])) {
+				error_log('Failed to get middle position in chunked stream');
+				$pointerPos = 0;
+				$pointer = 0;
+			} else {
+				$pointer = $m[1][1];
+				$pointerPos = round(100 * $pointer / strlen($this->buffer));
+			}
+		} else {
+			$pointerPos = 50;
+			$pointer = round(strlen($this->buffer) * $pointerPos / 100);
+		}
+		return array($pointerPos, $pointer);
+	}
+	
+	private function isChunkedStream() {
+		return stripos($this->cur_conn->getStreamHeaders(true), 'chunked') !== false;
 	}
 
 
@@ -292,7 +351,7 @@ class StreamUnit {
 			if ($secPassed > $this->waitSec) {
 				// может close+exception заменить одним методом, например error(msg)
 				$this->close();
-				throw new Exception('Failed to start stream');
+				throw new CoreException('Failed to start stream');
 			}
 			// return;
 		}
@@ -343,6 +402,9 @@ class StreamUnit {
 		$bufSize = $this->isLive ? $this->getBufferSize() : strlen($this->buffer);
 		foreach ($this->clients as $peer => $client) {
 			$result = $client->put($this->buffer, $bufSize);
+			if ($this->isFinished() and $client->getPointerPosition() == 100) {
+				$this->dropClientByPeer($peer);
+			}
 		}
 
 		$this->trimBuffer();

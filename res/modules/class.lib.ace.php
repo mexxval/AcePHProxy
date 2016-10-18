@@ -1,105 +1,7 @@
 <?php
-// http://wiki.acestream.org/wiki/index.php/Engine_API#STATUS
-
-class AceConnect {
-	static private $instance;
-
-	protected $key = 'kjYX790gTytRaXV04IvC-xZH3A18sj5b1Tf3I-J5XVS1xsj-j0797KwxxLpBl26HPvWMm'; // public one
-	protected $conn = array(); // pid => connect
-	protected $host = '127.0.0.1';
-	protected $port = 62062;
-
-	static public function getInstance($key) {
-		if (!self::$instance) {
-			self::$instance = new AceConnect($key);
-		}
-		return self::$instance;
-	}
-
-	private function __construct($key = null) {
-		$this->key = $key ? $key : $this->key;
-	}
-
-	// для каждой трансляции новый коннект к Ace
-	public function getConnection($pid) {
-		if (!isset($this->conn[$pid])) {
-			$this->conn[$pid] = $this->connect($this->key, $this->host, $this->port, $pid);
-		}
-		return $this->conn[$pid];
-	}
-
-	protected function connect($key, $host, $port, $pid) {
-		$tmout = 1; // seconds
-		$conn = @stream_socket_client(sprintf('tcp://%s:%d', $host, $port), $errno, $errstr, $tmout);
-		if (!$conn) {
-			throw new Exception('Cannot connect to AceServer. ' . $errstr, $errno);
-		}
-		# stream_set_blocking($conn, 0); // с этим херня полная
-		stream_set_timeout($conn, 1, 0); // нужно ли
-		$conn = new AceConn($conn, $pid, $this);
-		$res = $conn->auth($key);
-		return $conn;
-	}
-
-	public function _closeConn($pid) {
-		if (!isset($this->conn[$pid])) { // O_o
-			return false;
-		}
-		// $this->conn[$pid]->close(); // закроется через destruct
-		unset($this->conn[$pid]);
-		return;
-	}
-
-	// TODO сильно рефакторить
-	public function startraw($pid, $fileidx = 0) {
-		$conn = $this->getConnection($pid);
-		if (!$conn->isAuthorized()) {
-			throw new Exception('Ace connection not authorized');
-		}
-
-		// вероятно $pid это имя торрент файла, поищем в папке /STORAGE/FILES
-		// оно может быть и урлом
-		$url = parse_url($pid);
-		if (!isset($url['scheme'])) { // видимо файл
-			if (!is_file($file = ('/STORAGE/FILES/' . $pid))) {
-				throw new Exception('Torrent file not found ' . $file);
-			}
-		} else {
-			$file = $pid;
-		}
-
-		$base64 = file_get_contents($file);
-		$base64 = base64_encode($base64);
-
-		$idx = rand(10, 99);
-		$conn->send('LOADASYNC ' . $idx . ' RAW ' . $base64 . ' 0 0 0', 0);
-		$conn->send('START RAW ' . $base64 . ' ' . $fileidx . ' 0 0 0', 10);
-		return $conn;
-	}
-
-	public function starttorrent($url) {
-		$conn = $this->getConnection($url);
-		if (!$conn->isAuthorized()) {
-			throw new Exception('Ace connection not authorized');
-		}
-		$idx = rand(10, 99);
-		$conn->send('LOADASYNC ' . $idx . ' TORRENT ' . $url . ' 0 0 0', 0);
-		$conn->send('START TORRENT ' . $url . ' 0 0 0 0 0', 15);
-		return $conn;
-	}
-
-	public function startpid($pid) {
-		$conn = $this->getConnection($pid);
-		if (!$conn->isAuthorized()) {
-			throw new Exception('Ace connection not authorized');
-		}
-		$conn->send('START PID ' . $pid . ' 0', 15);
-		return $conn;
-	}
-}
 
 
-class AceConn {
+class AceConn implements AppStreamResource {
 	const STATE_HDRREAD = 0x03; // начало чтения заголовков потока
 	const STATE_HDRSENT = 0x04; // Потоковая передача, все подготовлено, и пошла собственно выдача видео
 	const STATE_ERROR = 0x08;
@@ -122,11 +24,55 @@ class AceConn {
 	protected $headers = array();
 	protected $reqheaders;
 
+	private $cid; // contentID: base64, url, PID
+	private $fileidx;
+	private $startMode; // raw, torrent, pid
+
 	public function __construct($conn, $pid, $parent) {
 		$this->conn = $conn;
 		$this->pid = $pid;
 		$this->parent = $parent;
-		// error_log('construct aceconn ' . spl_object_hash($this));
+		# error_log('construct aceconn ' . spl_object_hash($this));
+	}
+	public function __destruct() {
+		$this->disconnect();
+		# error_log(' destruct aceconn ' . spl_object_hash($this));
+	}
+
+	public function startraw($base64, $fileidx) {
+		$this->fileidx = $fileidx;
+		$this->cid = $base64;
+		$this->startMode = 'raw';
+	}
+	public function starttorrent($url) {
+		$this->fileidx = null;
+		$this->cid = $url;
+		$this->startMode = 'torrent';
+	}
+	public function startpid($pid) {
+		$this->fileidx = null;
+		$this->cid = $pid;
+		$this->startMode = 'pid';
+	}
+
+	public function open() {
+		switch ($this->startMode) {
+			case 'raw':
+				$idx = rand(10, 99);
+				$this->send('LOADASYNC ' . $idx . ' RAW ' . $this->cid . ' 0 0 0', 0);
+				$this->send('START RAW ' . $this->cid . ' ' . $this->fileidx . ' 0 0 0', 10);
+				break;
+			case 'torrent':
+				$idx = rand(10, 99);
+				$this->send('LOADASYNC ' . $idx . ' TORRENT ' . $this->cid . ' 0 0 0', 0);
+				$this->send('START TORRENT ' . $this->cid . ' 0 0 0 0 0', 15);
+				break;
+			case 'pid':
+				$this->send('START PID ' . $this->cid . ' 0', 15);
+				break;
+			default:
+				throw new CoreException('Unknown start mode', 0);
+		}
 	}
 
 	public function auth($prodkey) {
@@ -192,7 +138,8 @@ class AceConn {
 
 
 
-	private function readsocket($sec = 0, $usec = 300000) {
+	// public только для aceCLI.php
+	public function readsocket($sec = 0, $usec = 300000) {
 		stream_set_timeout($this->conn, $sec, $usec);
 
 		// при падении ace engine моментально выставляется eof в true
@@ -207,12 +154,13 @@ class AceConn {
 		$dlstat = array();
 		$line = trim(fgets($this->conn));
 		if ($line) {
+			$dlstat['line'] = $line;
 			if ($line == 'EVENT getuserdata') {
 				$this->send('USERDATA [{"gender": 1}, {"age": 4}]');
 				// error_log('Send userdata');
 			}
 
-			error_log('Ace line: ' . $line);
+			# error_log('Ace line: ' . $line);
 			$pattern = '~^STATUS\smain:(?<state>buf|prebuf|dl|check);(?<percent>\d+)(;(\d+;\d+;)?\d+;' .
 				'(?<spdn>\d+);\d+;(?<spup>\d+);(?<peers>\d+);\d+;(?<dlb>\d+);\d+;(?<ulb>\d+))?$~s';
 			if (preg_match($pattern, $line, $m)) {
@@ -237,7 +185,7 @@ class AceConn {
 				$tmp = explode(' ', $line);
 				$this->link = $tmp[1];
 				$this->isLive = (isset($tmp[2]) and $tmp[2] == 'stream=1');
-				// error_log('Got link ' . $this->link);
+				// error_log('Got link ' . $this->link . '  ' . ($this->isLive ? 'is live' : 'is NOT live'));
 			}
 
 			// TODO можно и красивше сделать
@@ -265,15 +213,14 @@ class AceConn {
 
 
 	public function getStreamHeaders($implode = true) {
-		return $implode ? 
+		if (!$this->headers) {
+			return $implode ? '' : array();
+		}
+		return $implode ?
 			implode("\r\n", $this->headers) . "\r\n\r\n" :
 			$this->headers;
 	}
 
-	public function __destruct() {
-		$this->disconnect();
-		# error_log(' destruct aceconn ' . spl_object_hash($this));
-	}
 	protected function disconnect() {
 		$this->send('STOP');
 		fclose($this->conn);
@@ -312,6 +259,9 @@ class AceConn {
 		// XBMC делает при старте много запросов подряд, при неблокирующем чтении можно просто
 		// не успеть прочитать и отдать данные, получится пустой ответ (при следующем коннекте предыдущий кикается)
 		// и перемотка видео работать не будет.
+// TODO с этим что то надо сделать! может просто таймаут побольше? секунд 5 например. а то софт вешается бывает
+#		stream_set_blocking($this->resource, 0);
+#		stream_set_timeout($this->resource, 5, 0); // не особо действенный способ вышел
 		$chunk = $this->readStreamChunk($this->resource, $bufSize);
 
 		// теперь переводим поток в неблокирующий режим, он помогает от зависаний в желтом состоянии буфера
@@ -446,6 +396,7 @@ class AceConn {
 		array_unshift($headers, 'Host: 127.0.0.1:6878'); // кладем сверху свой Host
 		array_unshift($headers, $get); // кладем сверху свой GET
 		
+		// пытался сделать trim() до explode, а сюда добавить \r\n, зависает софт. че за ХХ
 		$headers = implode("\r\n", $headers);
 
 		// готовы открывать коннект к видеоданным
@@ -477,10 +428,20 @@ class AceConn {
 
 	// перемотка
 	public function seek($offsetBytes) {
-		// хитрый ход. закрываем ресурс, ставим метку оффсета, при запросе данных поток откроется с заданного места
-		fclose($this->resource);
-		$this->resource = null;
 		$this->seek = $offsetBytes;
+		// хитрый ход. закрываем ресурс, ставим метку оффсета, при запросе данных поток откроется с заданного места
+		is_resource($this->resource) and fclose($this->resource);
+		$this->resource = null;
+		$this->headers = array();
+		// из-за несброшенной ссылки с концами вешался весь софт
+		// XBMC, как известно, делает несколько запросов для поддержки перемотки.
+		// на каждый следующий запрос Ace выдавал немного другую ссылку. infohash был тот же, но rand() другой
+		// http://127.0.0.1:6878/content/6aa8418581a92db20cf588aa0f651cdd7a7834a8/0.370222724338
+		// менялась последняя часть 0.370...
+		// и при следующем вызове initiateStream() открывалась старая ссылка и ожидались данные, а их нет
+		// и быть не будет, а режим там блокирующий.. вот и виселица
+		// ХЕР, все вообще не так было, я зря новый START отправлял на Ace Server
+		# $this->link = null;
 	}
 
 

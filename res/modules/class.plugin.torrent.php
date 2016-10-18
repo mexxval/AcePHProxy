@@ -6,29 +6,29 @@
 //	/torrent/multi/blabla.torrent/2
 //	/torrent/playlist.m3u
 
-class AcePlugin_torrent implements AcePluginInterface {
-	private $basedir;
+
+class AcePlugin_torrent extends AcePlugin_common {
 	private $ace;
 
-	public function __construct($config) {
+	protected function init() {
 		if (!class_exists('AceConnect')) {
 			throw new CoreException('AceConnect class not found, cant work', 0);
 		}
-		$this->basedir = '/STORAGE/FILES/';
-$key = 'n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE';
-		$this->ace = AceConnect::getInstance($key);
+		$this->ace = AceConnect::getInstance($this->acestreamkey);
 	}
 
-	// метод возвращает объект ClientResponse, а по ссылке массив инфы о потоке/запросе
-	public function process(ClientRequest $req, &$info) {
-		$info = array(
-			'streamid' => null
-		);
+	// косяк был такой! при старте видео XBMC, как известно, делает несколько разных коннектов
+	// и тут на каждый запрос вызывается startraw! что хреново! т.к. поток уже запущен и
+	// надо просто переоткрыть ссылку от ace с новым Range: bytes=
+	// а я думаю, что-то в логе не то, START http:// лишние лезут откуда-то
+	public function process(ClientRequest $req) {
 		// для пробивочного запроса выдаем заголовки и закрываем коннект
 		if ($req->getReqType() == 'HEAD' or ($req->isRanged() and $req->isEmptyRanged())) {
-			return	'HTTP/1.1 200 OK' . "\r\n" .
-					'Content-Length: 14324133' . "\r\n" . // TODO хедеры от балды, поправить
-					'Accept-Ranges: bytes' . "\r\n\r\n";
+			return $req->response(
+				'HTTP/1.1 200 OK' . "\r\n" .
+				'Content-Length: 14324133' . "\r\n" . // TODO хедеры от балды, поправить
+				'Accept-Ranges: bytes' . "\r\n\r\n"
+			);
 		}
 
 		// определяем уникальный идентификатор контента
@@ -43,24 +43,19 @@ $key = 'n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE';
 				'Content-Length: ' . strlen($playlist) . "\r\n" .
 				'Accept-Ranges: bytes' . "\r\n\r\n" .
 				$playlist;
-			return $response;
+			return $req->response($response);
 		}
 
 		$streamid = $pid;
 		if (is_numeric($name)) { // для многосерийных торрентов видимо. name содержит номер видеофайла
 			$streamid .= $name;
 		}
-		$info['streamid'] = $streamid;
-		return;
+
+		$conn = $this->ace->startraw($pid, $name); // TODO refactor, it is NOT name for series
+		$conn->setRequestHeaders($req->getHeaders());
+		return $req->response($conn, $streamid);
 	}
 
-	// должен вернуть указатель чтения данных (file pointer)
-	public function getStreamResource(ClientRequest $req) {
-		$pid = $req->getPid();
-		$conn = $this->ace->startraw($pid, $req->getName()); // TODO refactor, it is NOT name for series
-		$conn->setRequestHeaders($req->getHeaders());
-		return $conn;
-	}
 
 	private function playlist($req) {
 		$playlist = array();

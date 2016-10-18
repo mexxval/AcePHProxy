@@ -1,7 +1,7 @@
 <?php
 
 interface AcePluginInterface {
-	public function __construct($config);
+	public function __construct(AcePHProxy $app, $config = array());
 
 	// метод возвращает объект ClientResponse, а по ссылке массив инфы о потоке/запросе
 	public function process(ClientRequest $req, &$info);

@@ -34,21 +34,25 @@ class StreamsManager {
 		try {
 			$client = $req->getClient();
 			$plugin = $this->app->getPlugin($pcode);
-			// в response обычно ожидаем http-хедеры для ответа клиенту
-			// это если запрос быстрый, а если это запуск видео, то в response пусто
-			$response = $plugin->process($req, $info);
+			$response = $plugin->process($req);
+
+			// плагины мб разной степени кривизны, в т.ч. могут вернуть неверный объект или null/false
+			if (!is_a($response, 'ClientResponse')) {
+				throw new CoreException('Wrong response from plugin ' . $pcode, 0);
+			}
 
 			// если требуется запуск, смотрим по id, не запущено ли уже
-			if (!empty($info['streamid'])) {
-				$streamid = $info['streamid'];
+			if ($response->isStream()) {
+				$streamid = $response->getStreamId();
 				// если трансляции нет, создаем экземпляр
-				if (!isset($this->streams[$streamid])) {
-					$this->app->log('Start new stream ' . $req->getName());
+				if (!$this->isExists($streamid)) {
+					$this->app->log('Start new stream ' . $response->getName());
 					// просим плагин запустить поток. вся логика ace, file, torrent, web, soap - на стороне плагинов
 					// но создавать самостоятельно новые потоки плагин не может. надо тут проверить, не запущен ли уже такой streamid
-					$this->streams[$streamid] = new StreamUnit($plugin->getStreamResource($req));
+					$this->streams[$streamid] = new StreamUnit($response->getStreamResource());
 				}
 				else { // уже есть и запущено
+					#error_log('Stream exists');
 					$this->streams[$streamid]->unfinish();
 				}
 				// если мы тут, значит поток либо успешно создан, либо уже был создан ранее
@@ -60,10 +64,11 @@ class StreamsManager {
 				}
 
 				// регистрируем клиента в потоке
+				#error_log('Register client in stream');
 				$this->streams[$streamid]->registerClient($client);
 				// на клиента ничего не пишем, ответные заголовки будут потом
 			} else {
-				$client->put($response);
+				$client->put($response->getContents());
 				$client->close();
 			}
 		}
@@ -125,7 +130,6 @@ class StreamsManager {
 				$this->markStream4Close($pid);
 			}
 		}
-		unset($one);
 
 		// потоки, помеченные для закрытия, закрываем по достижении таймаута
 		foreach ($this->closeStreams as $pid => $time) {
@@ -137,7 +141,7 @@ class StreamsManager {
 	}
 
 	protected function closeStream($pid) {
-		if (!isset($this->streams[$pid])) {
+		if (!$this->isExists($pid)) {
 			return false; // o_O
 		}
 		$name = $this->streams[$pid]->getName();

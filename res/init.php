@@ -1,6 +1,6 @@
 <?php
 
-define('ACEPHPROXY_VERSION', '0.7.0');
+define('ACEPHPROXY_VERSION', '0.8.0');
 
 
 $subdirs = array('interface', 'core', 'modules');

@@ -1,7 +1,9 @@
 <?php
 interface AppUserInterface {
-	public function init();
-	public function draw($streams, $addinfo);
+	static public function getInstance();
+
+	public function init2(AcePHProxy $app);
+	public function draw();
 
 	public function log($msg, $color);
 	public function error($msg);

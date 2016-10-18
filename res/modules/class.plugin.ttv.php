@@ -1,46 +1,29 @@
 <?php
 
-class AcePlugin_ttv implements AcePluginInterface {
+class AcePlugin_ttv extends AcePlugin_common {
 	private $ace;
-	private $ttv_login;
-	private $ttv_psw;
 
-	public function __construct($config) {
+	protected function init() {
 		if (!class_exists('AceConnect')) {
 			throw new CoreException('AceConnect class not found, cant work', 0);
 		}
 
-// CONFIG !!
-// создаем коннект к acestream, запускаем клиентский сокет
-// изначально был этот ключ
-$key = 'n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE';
-#$this->ttv_login = $login;
-#$this->ttv_psw = $pw;
-
-		$this->ace = AceConnect::getInstance($key);
+		// создаем коннект к acestream, запускаем клиентский сокет
+		$this->ace = AceConnect::getInstance($this->acestreamkey);
 	}
 
 	// метод должен вернуть инфу по запросу и объект ответа, если запрос не предполагает запуска потока
-	// TODO избавиться от классов ClientResponse
-	public function process(ClientRequest $req, &$info) {
-		$info = array(
-			'streamid' => null
-		);
+	public function process(ClientRequest $req) {
 		// для пробивочного запроса выдаем заголовки и закрываем коннект
 		if ($req->getReqType() == 'HEAD' or ($req->isRanged() and $req->isEmptyRanged())) {
-			return	'HTTP/1.1 200 OK' . "\r\n" .
-					'Content-Length: 14324133' . "\r\n" . // TODO хедеры от балды, поправить
-					'Accept-Ranges: bytes' . "\r\n\r\n";
+			return $req->response(
+				'HTTP/1.1 200 OK' . "\r\n" .
+				'Content-Length: 14324133' . "\r\n" . // TODO хедеры от балды, поправить
+				'Accept-Ranges: bytes' . "\r\n\r\n"
+			);
 		}
 
 
-		// определяем уникальный идентификатор контента
-		$info['streamid'] = $req->getPid();
-		return;
-	}
-
-	// TODO где бы тут воткнуть определение NAME из LOADASYNC
-	public function getStreamResource(ClientRequest $req) {
 		$type = $req->getType();
 		$pid = $req->getPid();
 		$tmp = null;
@@ -73,8 +56,12 @@ $key = 'n51LvQoTlJzNGaFxseRK-uvnvX-sD4Vm5Axwmc4UcoD-jruxmKsuJaH0eVgE';
 				$conn = $this->ace->starttorrent($pid);
 		}
 		$conn->setRequestHeaders($req->getHeaders());
-		return $conn;
+
+		// определяем уникальный идентификатор контента
+		$streamid = $req->getPid();
+		return $req->response($conn, $streamid);
 	}
+
 
 	protected function torrentAuth() {
 		error_log('Authorizing on torrent');

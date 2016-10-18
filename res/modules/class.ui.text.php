@@ -1,12 +1,18 @@
 <?php
 
 // текстовый консольный интерфейс на случай, если нет ncurses
-class AppUI_Text implements AppUserInterface {
+class AppUI_Text extends AppUI_common {
+
+	// только ради требований базового класса, обращений к модулю извне не предполагается
+	public function process(ClientRequest $req) {
+	}
+
 	public function init() {
 	}
-	public function draw($streams, $addinfo) {
+
+	public function draw() {
 		$clients = 0;
-		foreach ($streams as $one) {
+		foreach ($this->getStreams() as $one) {
 			$clients += count($one->getPeers());
 		}
 		echo 'Active streams: ' . count($streams) . "\t" . 'Active clients: ' . $clients . "\r";
@@ -14,12 +20,6 @@ class AppUI_Text implements AppUserInterface {
 
 	public function log($msg, $color = null) {
 		echo $msg . "\n";
-	}
-	public function error($msg) {
-		return $this->log($msg);
-	}
-	public function success($msg) {
-		return $this->log($msg);
 	}
 }
 

@@ -65,16 +65,20 @@ class ClientPool {
 				}
 			}
 			catch (Exception $e) {
-				// если в возвращаемых методом массивах будут объекты (главный цикл, new), 
+				// если в возвращаемых методом массивах будут объекты (главный цикл, new),
 				// то __destruct не срабатывает, хотя new там перезаписывается каждый цикл, непонятно
+				// флаг finished выставляется в методе close(), так что вызывать его еще раз ни к чему
+				// upd: нет, надо! клиент может не только по флагу finished сам себя закрыть.
+				// но еще и отменить запрос (прервать закачку файла) и отвалиться
 				$one->close();
-				unset($one);
 				unset($this->clients[$peer]);
 				$doneclients[$peer] = null;
 				// ассоциированные трансляции должны удалиться через __destruct клиента
 				// тут можно разве что в лог написать
-				# error_log('disconnected ' . $peer);
+				// error_log('disconnected ' . $peer);
 
+				// чо это такое? и нафиг надо
+				// кажется чтобы в логе connected и disconnected были по порядку
 				if (in_array($e->getCode(), array(3, 4))) {
 					$recheck = true;
 				}
@@ -88,7 +92,7 @@ class ClientPool {
 			// а мы после этого только пишем, что он приконнектился
 			// еще одна мелкая эстетическая проблемка. когда клиент рвет соединение и тут же создает новое 
 			// в логе пишется сначала connected для нового. затем disconnected для старого коннекта
-			# error_log('connected ' . $peer);
+			// error_log('connected ' . $peer);
 			$this->clients[$peer] = new StreamClient($peer, $conn);
 			$newclients[$peer] = null;
 		}

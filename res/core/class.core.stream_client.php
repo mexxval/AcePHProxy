@@ -17,6 +17,7 @@ class StreamClient {
 	protected $tsconnected; // когда подключился
 	protected $bytesgot = 0; // сколько данных принял
 	protected $isAccepted = false; // отправлены ли на клиент HTTP заголовки
+	protected $listener;
 
 	public function __construct($peer, $socket) {
 		$this->peer = $peer;
@@ -24,8 +25,15 @@ class StreamClient {
 		stream_set_blocking($this->socket, 0);
 		stream_set_timeout($this->socket, 0, 20000);
 		$this->tsconnected = time();
+		# error_log('construct client ' . spl_object_hash ($this));
 	}
 
+	public function registerEventListener($cb) {
+		$this->listener = $cb;
+	}
+	protected function notifyListener($event) {
+		is_callable($this->listener) and call_user_func_array($this->listener, array($this, $event));
+	}
 	public function getIp() {
 		return implode('', array_slice(explode(':', $this->peer), 0, 1));
 	}
@@ -86,9 +94,10 @@ class StreamClient {
 
 	public function accept($headers, $pointer = 0, $pointerPos = 0) {
 		if ($this->isAccepted()) { // клиент уже получил заголовки, пропускаем
-			error_log('already accepted!! why again???');
+			error_log(sprintf('already accepted %s!! why again???', $this->getName()));
 			return;
 		}
+		# error_log(sprintf('ACCEPT %s with %s ptr %d', $this->getName(), json_encode($headers), $pointer));
 		$this->pointer = 0;
 		$this->pointerPos = 0;
 		$this->isAccepted = true;
@@ -159,25 +168,42 @@ class StreamClient {
 		// XBMC при попытке остановить поток во время Ace-буферизации вис до окончания буферизации
 		// причина была в том, что весь буфер был уже записан, и флаг ecoMode по сути не работал
 		// put был пуст и мы выходили из метода
-		// поэтому ecoMode определяем сами как последние 10кБ буфера, думаю этого достаточно, 
+		// поэтому ecoMode определяем сами как последние 10кБ буфера, думаю этого достаточно,
 		// чтобы по 5 байт выдавать до таймаута самого XBMC
 		// работает!
-		$ecoMode = ($this->ecoModeEnabled and (!$writeWhole and ($dataLen - $this->pointer) < 100000));
+		// ecoMode - выдача данных по 1 байту, т.к. XBMC при отсутствии данных вешается нахер,
+		// не реагирует ни на какие раздражители, пока не отвалится по таймауту
+		// upd: чтобы это работало, нужно подкорректировать bufSize, чтобы тот не вылез за пределы dataLen
+		// например: в этот проход разница данные-указатель > 50000, а bufSize = 256000, 
+		// и в след.проход на клиента пишутся остатки буфера и ничего для ecoMode не остается
+		$ecoModeTailLength = 50000;
+		$ecoMode = false;
+		// ecoMode представляет проблему для режима просмотра фильма,
+		// но очень и очень полезен для режима ТВ:
+		// дает стабильность и XBMC быстрее отрабатывает остановку потока
+		if ($this->ecoModeEnabled and !$writeWhole and ($this->pointer + $bufSize) > ($dataLen + $ecoModeTailLength)) {
+			$ecoMode = true;
+		}
 		if ($ecoMode) {
-			$bufSize = 3;
+			$bufSize = 1;
 		}
 
 		$put = substr($data, $this->pointer, $bufSize);
 		if (!$put) {
+			# error_log('No data for client got from buffer');
 			return;
 		}
 		// а вот так работает. хотя функция "Returns a result code, as an integer"
 		// проверка же показала, что выдается число байт
 		$b = stream_socket_sendto($this->socket, $put);
+		if ($writeWhole and $b < strlen($put)) {
+			error_log('Some data failed to write on client!');
+		}
 		// это явно ошибка и корректировать буфер на -1 совсем ни к чему
 		if ($b == -1) {
 			return $b;
 		}
+		# error_log($b . ' bytes was written on client');
 		// а $b может быть false или другим не-числом?
 		if ($correctPointer) {
 			$this->pointer += $b; // корректировка указателя
@@ -247,14 +273,39 @@ class StreamClient {
 		// Следовательно, часть логики поместим тут, а именно, собираем запрос от клиента
 		// до пустой строки, и только потом из полученного делаем объект запроса
 
-		$this->raw_read .= $sock_data;
+		$this->raw_read = $sock_data;
+
+		// TODO требуется такая логика: первые данные при коннекте нового клиента должны обрабатываться через
+		// clientPool как и сейчас. а дальнейшие данные уже в определенном плагине
+		// т.е. прочитали первую строку GET /websrv/... HTTP/1.0, выдали как объект ClientRequest
+		// дальше в случае гет-запроса данных не будет. 
+		// А вот в случае POST, как раз вместо того, что реализовано ниже (проверка длины пост-данных),
+		// можно было бы это делать уже в недрах соответствующего модуля
+		// В случае вебсокетов тоже - handshake читается тут, дальше работает модуль: все остальные
+		// данные с клиента и на него обрабатываются в плагине
+		// А тут логика упрощается донельзя. И нечего тут развесистые условия разводить.
 
 		// для DLNA нужно уметь обрабатывать POST-запросы. если запрос POST, ждем появления двойного переноса строк и
 		// контента длиной Content-Length байт. значение смотрим в заголовке
 		if (!preg_match('~HTTP/1\..*\r?\n\r?\n(.*)~sm', $this->raw_read, $content)) {
+			// одно из двух. либо клиент прислал реально какую-то чушь. 
+			// либо это доп.данные, через вебсокеты например
+			// error_log('wrong request from client: ' . $this->raw_read);
+			if ($this->last_request) { // запрос был создан, значит доп.данные
+				// добавляем данные в запрос, но сам его не возвращаем из метода,
+				// иначе он будет повторно обработан, а это совсем ни к чему.
+				// возврат объекта ClientRequest отсюда равносилен старту какого-то потока!
+				// TODO решить с этим -> $this->last_request->addData($sock_data);
+				$this->notifyListener(array('moredata' => $sock_data));
+			}
 			return false;
 		}
 
+		// РЕАЛИЗАЦИЯ: если мы тут, значит начало данных верное (HTTP протокол, GET-POST)
+		// создаем объект запроса сразу
+		$this->last_request = new ClientRequest($this->raw_read, $this);
+
+		// TODO это уже надо переносить в модуль, т.к. raw_read уже не наращивается через .=
 		$isPost = substr($this->raw_read, 0, 4) == 'POST';
 		// проконтролируем длину полученного контента
 		if ($isPost) {
@@ -282,9 +333,9 @@ class StreamClient {
 		// показывать кино параллельно на несколько устройств было бы можно, 
 		// если бы это поддерживал AceServer. Подключиться к потоку можно только в 1 поток :)
 		// соответственно, размножить видео в принципе можно, но перематывать сможет только кто-то один
-		// пока буду исходитьиз того, что одно и то же кино смотрит один клиент!
+		// пока буду исходить из того, что одно и то же кино смотрит один клиент!
 
-		return $this->last_request = new ClientRequest($this->raw_read, $this);
+		return $this->last_request;
 	}
 
 	// новая фича, пробуем уведомить XBMC-клиента об ошибке (popup уведомление)
@@ -329,16 +380,20 @@ class StreamClient {
 	}
 
 	public function close() {
+		// без этого не уничтожались объекты клиентов после их дисконнекта
+		unset($this->last_request);
+
 		if (!empty($this->stream)) {
 			$this->stream->unregisterClientByName($this->getName());
 			unset($this->stream); // без этого лишняя ссылка оставалась в памяти и объект потока не уничтожался
 		}
 		is_resource($this->socket) and fclose($this->socket);
 		$this->finished = true;
+		// error_log('client closed');
 	}
 
 	public function __destruct() {
-		# error_log(' destruct client ' . spl_object_hash ($this));
+		#error_log(' destruct client ' . spl_object_hash ($this));
 	}
 }
 

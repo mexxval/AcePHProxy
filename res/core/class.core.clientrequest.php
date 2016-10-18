@@ -7,8 +7,9 @@ class ClientRequest {
 	protected $req;
 	protected $client;
 
+
 	public function __construct($data, $client) {
-		error_log('client send: ' . $data);
+		//error_log('client send: ' . $data);
 		$this->req = $data;
 		$this->client = $client;
 		$this->start = $this->parse($this->req);
@@ -61,6 +62,16 @@ class ClientRequest {
 	public function getHttpHost($withPort = true) { // TODO withPort=false
 		return $this->start['reqHost'];
 	}
+
+	public function addData() {
+		error_log('TODO ' . __METHOD__);
+	}
+
+	// немного упрощает написание выдачи ответов в плагинах
+	public function response($contents = null, $streamid = null) {
+		return new ClientResponse($this, $contents, $streamid);
+	}
+
 
 	// TODO тут не дб логики обработки и кидания исключений
 	// только разбор заголовков и выдача их в удобном виде

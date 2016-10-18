@@ -27,26 +27,25 @@ class AcePHProxy {
 
 	private function init() {
 		$this->startts = time();
-		$this->initCtrlC();
 		$this->initSettings();
+		$this->initCtrlC();
 	}
 	private function initSettings() {
-		$this->config = new stdClass;
-		$this->config->listen_ip = '0.0.0.0';
-		$this->config->listen_port = 8001;
-		$this->config->stream_keepalive_sec = 5;
-
 		$setup_file = __DIR__ . '/../.acePHProxy.settings';
-		$cfg = json_decode(file_get_contents($setup_file), true);
+		$savedcfg = json_decode(file_get_contents($setup_file), true);
+		$defaultcfg = array(
+			'buffers' => array(),
+			'listen_ip' => '0.0.0.0',
+			'listen_port' => '8001',
+			'stream_keepalive_sec' => 5,
+			'ui' => array('ncurses'),
+		);
+
+		// такое выражение действует так:
+		// в результирующий массив попадают все ключи из savedcfg в неизменном виде,
+		// плюс те ключи из defaultcfg, которых нет в savedcfg
+		$this->config = $savedcfg + $defaultcfg;
 	}
-		/*
-		public function __destruct() {
-			file_put_contents($this->setup_file, json_encode(array(
-				'buffers' => $this->buffers,
-				'ttv_login' => $this->ttv_login,
-				'ttv_psw' => $this->ttv_psw,
-			)));
-		}*/
 
 	private function initCtrlC() {
 		if (!function_exists('pcntl_signal')) {
@@ -71,18 +70,22 @@ class AcePHProxy {
 			if ($m == 'error') {
 				error_log($a[0]);
 			}
-			$ui = $this->getUI();
-			return $ui ? call_user_func_array(array($ui, $m), $a) : null;
+			foreach ($this->getUI() as $one) {
+				call_user_func_array(array($one, $m), $a);
+			}
 		}
 	}
-	public function getPlugin($type) {
-		$plugin = 'AcePlugin_' . $type; // название класса плагина, регистр не важен
+	public function getPlugin($type, $fullClassName = false) {
+		// название класса плагина, регистр не важен
+		$plugin = $fullClassName ? $type : ('AcePlugin_' . $type);
 		if (!class_exists($plugin)) {
 			throw new CoreException('Plugin type not found', 0, $type);
 		}
-		// TODO уметь и синглтоны
-		$config = array(); // TODO
-		return new $plugin($config);
+		$config = isset($this->config[$type]) ? $this->config[$type] : array();
+		if (is_callable($cb = array($plugin, 'getInstance'))) {
+			return call_user_func_array($cb, array($this, $config));
+		}
+		return new $plugin($this, $config);
 	}
 
 	public function tick() {
@@ -100,7 +103,6 @@ class AcePHProxy {
 				foreach ($new['start'] as $peer => $req) {
 					$streams->start2($req);
 				}
-				unset($info, $req, $client); // обязательно. ибо лишние object-ссылки
 
 				foreach ($new['new'] as $peer => $_) {
 				}
@@ -118,42 +120,67 @@ class AcePHProxy {
 			$streams->closeWaitingStreams();
 			$streams->copyContents();
 
-			// выведем аптайм и потребляемую память
-			$allsec = time() - $this->startts;
-			$secs = sprintf('%02d', $allsec % 60);
-			$mins = sprintf('%02d', floor($allsec / 60 % 60));
-			$hours = sprintf('%02d', floor($allsec / 3600));
-			$mem = memory_get_usage(); // bytes
-			$mem = round($mem / (1024 * 1024), 1); // MBytes
-
-			$addinfo = array(
-				'ram' => $mem,
-				'uptime' => "$hours:$mins:$secs",
-				'title' => ' AcePHProxy v.' . ACEPHPROXY_VERSION . ' ',
-				'port' => $pool->getPort(),
-				'wwwok' => $this->wwwstate
-			);
-			$UI = $this->getUI();
-			$UI and $UI->draw($streams->getStreams(), $addinfo);
+			// дергаем метод перерисовки всех UI
+			foreach ($this->getUI() as $one) {
+				$one->draw();
+			}
 		}
 		catch (Exception $e) {
 			$this->error($e->getMessage());
 		}
 	}
 
+	// метод выдачи некоторой вспомогательной и статистической инфы для вывода в UI
+	public function getUIAdditionalInfo() {
+		// выведем аптайм и потребляемую память
+		$allsec = time() - $this->startts;
+		$secs = sprintf('%02d', $allsec % 60);
+		$mins = sprintf('%02d', floor($allsec / 60 % 60));
+		$hours = sprintf('%02d', floor($allsec / 3600));
+		$mem = memory_get_usage(); // bytes
+		$mem = round($mem / (1024 * 1024), 1); // MBytes
 
-	// получаем какой нибудь интерфейс (текстовый, ncurses или вообще никакой, можно и без него работать)
-	// public только для StreamManager
+		$pool = $this->getClientPool();
+		$addinfo = array(
+			'ram' => $mem,
+			'uptime' => "$hours:$mins:$secs",
+			'title' => ' AcePHProxy v.' . ACEPHPROXY_VERSION . ' ',
+			'port' => $pool->getPort(),
+			'wwwok' => $this->wwwstate
+		);
+		return $addinfo;
+	}
+
+
+	// в соответствии с конфигом инстанцируем нужные модули UI
 	private function getUI() {
-		// return null;
 		if (is_null(self::$ui)) {
-			// default UI type
-			$UICLASS = 'AppUI_Text';
-			if (function_exists('ncurses_init') and 1) {
-				$UICLASS = 'AppUI_NCurses';
+			self::$ui = array();
+
+			// ищем все загруженные модули интерфейсов и инстанцируем
+			$list = get_declared_classes();
+			$cfgui = $this->config['ui']; // интерфейсы из конфига, произвольный регистр
+			$regexp = '~(' . implode('|', $cfgui) . ')~i';
+
+			foreach ($list as $className) {
+				if (preg_match($regexp, $className)) {
+					try {
+						// try-catch, ибо ncurses например может взбрыкнуть,
+						// если расширение в пхп не загружено
+						// все UI - синглтоны
+						if (is_a($className, 'AppUserInterface', true)) {
+							$tmp = $this->getPlugin($className, true);
+						} else {
+							throw new CoreException($className . ' is not a AppUserInterface class', 0);
+						}
+					} catch (Exception $e) {
+						$this->error($e->getMessage());
+						continue;
+					}
+					self::$ui[] = $tmp;
+					$tmp->init2($this);
+				}
 			}
-			self::$ui = new $UICLASS;
-			self::$ui->init();
 		}
 		return self::$ui;
 	}
@@ -187,16 +214,18 @@ class AcePHProxy {
 	private function getClientPool() {
 		// создает сокет сервера трансляций и управляет коннектами клиентов к демону
 		if (!self::$pool) {
-			self::$pool = new ClientPool($this->config->listen_ip, $this->config->listen_port);
+			self::$pool = new ClientPool($this->config['listen_ip'], $this->config['listen_port']);
 		}
 		return self::$pool;
 	}
 
-	private function getStreamManager() {
+	// пришлось сделать public для AcePlugin_common::getStreams()
+	// для AppUserInterface::init() тоже пригодилось
+	public function getStreamManager() {
 		// управляет трансляциями. заказывает их у Ace и раздает клиентам из pool
 		if (!self::$mgr) {
 			self::$mgr = new StreamsManager($this);
-			self::$mgr->setKeepaliveTime($this->config->stream_keepalive_sec);
+			self::$mgr->setKeepaliveTime($this->config['stream_keepalive_sec']);
 		}
 		return self::$mgr;
 	}
