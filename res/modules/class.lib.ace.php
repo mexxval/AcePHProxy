@@ -4,6 +4,10 @@
 class AceConn implements AppStreamResource {
 	const STATE_HDRREAD = 0x03; // начало чтения заголовков потока
 	const STATE_HDRSENT = 0x04; // Потоковая передача, все подготовлено, и пошла собственно выдача видео
+		# ручной разбор chunked потоков пришлось вернуть, ибо самсунг тв не умеет их декодировать
+		# из-за чего нормальный просмотр ТВ на нем невозможен
+		const STATE_CHUNKWAIT = 0x05; // ожидание длины чанка, аналог _HDRSENT, но для Chunked потока
+		const STATE_CHUNKREAD = 0x06; // чтение чанка на полученную длину
 	const STATE_ERROR = 0x08;
 
 	protected $state = null;
@@ -20,32 +24,34 @@ class AceConn implements AppStreamResource {
 	protected $resource;
 	protected $name;
 	protected $seek = 0;
+		protected $isChunked = false;
+		protected $currentChunkSize = 0;
 
 	protected $headers = array();
 	protected $reqheaders;
 
 	private $cid; // contentID: base64, url, PID
-	private $fileidx;
+	private $fileidx = 0; // для правильного определения имени потока из множества
 	private $startMode; // raw, torrent, pid
 
 	public function __construct($conn, $pid, $parent) {
 		$this->conn = $conn;
 		$this->pid = $pid;
 		$this->parent = $parent;
-		# error_log('construct aceconn ' . spl_object_hash($this));
+		// error_log('construct aceconn ' . spl_object_hash($this));
 	}
 	public function __destruct() {
 		$this->disconnect();
-		# error_log(' destruct aceconn ' . spl_object_hash($this));
+		// error_log(' destruct aceconn ' . spl_object_hash($this));
 	}
 
-	public function startraw($base64, $fileidx) {
+	public function startraw($base64, $fileidx = 0) {
 		$this->fileidx = $fileidx;
 		$this->cid = $base64;
 		$this->startMode = 'raw';
 	}
-	public function starttorrent($url) {
-		$this->fileidx = null;
+	public function starttorrent($url, $fileidx = 0) {
+		$this->fileidx = $fileidx;
 		$this->cid = $url;
 		$this->startMode = 'torrent';
 	}
@@ -79,7 +85,7 @@ class AceConn implements AppStreamResource {
 		// HELLOBG, get inkey
 		$ans = $this->send('HELLOBG version=3'); // << HELLOTS ... key=...
 		if (!preg_match('~key=([0-9a-f]{10})~', $ans, $m)) {
-			throw new Exception('No answer with HELLOBG. ' . $ans);
+			throw new CoreException('No answer with HELLOBG. ' . $ans, CoreException::EXC_CONN_FAIL);
 		}
 		$inkey = $m[1];
 		if (!$inkey) {
@@ -110,6 +116,7 @@ class AceConn implements AppStreamResource {
 
 	public function send($string, $sec = 1, $usec = 0) {
 		stream_socket_sendto($this->conn, $string . "\r\n");
+		//	 error_log('Ace send: ' . $string);
 		$line = $this->readsocket($sec, $usec);
 		return $line;
 	}
@@ -137,7 +144,6 @@ class AceConn implements AppStreamResource {
 	}
 
 
-
 	// public только для aceCLI.php
 	public function readsocket($sec = 0, $usec = 300000) {
 		stream_set_timeout($this->conn, $sec, $usec);
@@ -160,7 +166,7 @@ class AceConn implements AppStreamResource {
 				// error_log('Send userdata');
 			}
 
-			# error_log('Ace line: ' . $line);
+			// error_log('Ace line: ' . $line);
 			$pattern = '~^STATUS\smain:(?<state>buf|prebuf|dl|check);(?<percent>\d+)(;(\d+;\d+;)?\d+;' .
 				'(?<spdn>\d+);\d+;(?<spup>\d+);(?<peers>\d+);\d+;(?<dlb>\d+);\d+;(?<ulb>\d+))?$~s';
 			if (preg_match($pattern, $line, $m)) {
@@ -173,6 +179,11 @@ class AceConn implements AppStreamResource {
 					'dl_bytes' => @$m['dlb'],
 					'ul_bytes' => @$m['ulb'],
 				);
+			} else if (substr($line, 0, 5) == 'EVENT') {
+			} else if (substr($line, 0, 5) == 'STATE') {
+				// error_log('Ace: ' . $line);
+			} else {
+				// error_log('Ace line not matched: ' . $line);
 			}
 
 			// несколько косвенно. можно смотреть на окончание данных по ссылке
@@ -195,7 +206,7 @@ class AceConn implements AppStreamResource {
 				$answer = explode(' ', $line, 3);
 				if (isset($answer[2])) {
 					$answer = json_decode($answer[2], true);
-					$fileidx = 0; // TODO
+					$fileidx = $this->fileidx;
 					// первый попавшийся filename берем как название ресурса
 					if (isset($answer['files'], $answer['files'][$fileidx], $answer['files'][$fileidx][0])) {
 						$this->name = urldecode($answer['files'][$fileidx][0]);
@@ -274,6 +285,26 @@ class AceConn implements AppStreamResource {
 	protected function readStreamChunk($res, $bufferSize) {
 		$tmp = '';
 
+		if ($this->state == self::STATE_CHUNKWAIT) {
+			// $tmp = fgets($res);
+				$tmp = stream_get_line($res, 16, "\r\n");
+			$len = trim($tmp);
+			if (!$len) {
+				return '';
+			}
+			if (!preg_match('~^[0-9a-f]{1,8}$~', $len)) {
+				throw new Exception('Chunk read failed "' . json_encode($len) . '"');
+			}
+			else {
+				// +2 на \r\n, длина которых в чанке не учитывается
+				$this->currentChunkSize = hexdec($len) + 2;
+			}
+			$this->state = self::STATE_CHUNKREAD;
+		}
+		if ($this->state == self::STATE_CHUNKREAD or $this->state == self::STATE_CHUNKWAIT) {
+			$bufferSize = $bufferSize > $this->currentChunkSize ? $this->currentChunkSize : $bufferSize;
+		}
+
 		// замена fread на stream_socket_recvfrom решила проблему тормозов при просмотре torrent-файлов!
 		// потому как fread читает только по 8192 байт, хз как увеличить. второй параметр не работает
 		// stream_socket_recvfrom не работает как надо. 253871 - первая длина буфера после 3ffa0, бывало и 264к вместо 262к
@@ -296,11 +327,23 @@ class AceConn implements AppStreamResource {
 		$datalen = strlen($data);
 		// error_log('got stream ' . $datalen . ' bytes');
 
+		// контролируем, весь ли буфер прочитан
+		if ($this->state == self::STATE_CHUNKREAD) {
+			if ($datalen < $this->currentChunkSize) {
+				$this->currentChunkSize -= $datalen;
+			}
+			else {
+				$this->state = self::STATE_CHUNKWAIT;
+				$data = substr($data, 0, -2); // откусываем последние \r\n
+			}
+		}
+
 		return $data;
 	}
 
 	protected function readStreamHeaders($res) {
 		$headers = array();
+		$this->isChunked = false; // лишняя строка
 		while ($line = trim(fgets($res))) {
 			if (is_null($this->state)) { // только начали, первый шаг
 				if (strpos($line, 'HTTP/1.') === false) {
@@ -308,10 +351,29 @@ class AceConn implements AppStreamResource {
 				}
 				$this->state = self::STATE_HDRREAD;
 			}
+			if (strpos($line, ':') !== false) {
+				list ($name, $value) = array_map('trim', explode(':', $line));
+				if ($name == 'Transfer-Encoding' and $value == 'chunked') {
+					$this->isChunked = true;
+				}
+				// вот этот хедер здорово мешал, по сути препятствовал запуску потока
+				// я же chunked-поток разбираю (кстати можно вернуть этот хедер и не заниматься разбором)
+				// а раз уж разбираю, то и хедер естессно надо убирать
+				if (strpos($line, 'Trans') !== false) {
+					continue;
+				}
+			}
 			// обработка ошибок. бывает и такое
 			// "HTTP/1.1 500 Internal Server Error", "Content-Type: text/plain", "Content-Length: 45"
 			if (strpos($line, '500 Internal') !== false) {
 				$this->state = self::STATE_ERROR;
+			}
+			if (strpos($line, 'Connection:') !== false) {
+				//$line = 'Connection: close';
+			}
+			if ($line == 'Content-Type: None') {
+				// error_log('Content-Type = None, rewrite to video/x-msvideo');
+				// $line = 'Content-Type: video/x-msvideo';
 			}
 			$headers[] = $line;
 		}
@@ -323,7 +385,7 @@ class AceConn implements AppStreamResource {
 		}
 
 		// устанавливается состояние Потоковая передача. 
-		$this->state = self::STATE_HDRSENT;
+		$this->state = $this->isChunked ? self::STATE_CHUNKWAIT : self::STATE_HDRSENT;
 		return $headers;
 	}
 
@@ -406,7 +468,7 @@ class AceConn implements AppStreamResource {
 			throw new Exception('Failed to open stream link');
 		}
 		// пишем заголовки запроса
-		 error_log('open stream request ' . $headers);
+		// error_log('open stream request ' . $headers);
 		// почему использована именно эта функция? при записи нужен блокирующий режим
 		// stream_socket_sendto($link_src, $headers);
 		fwrite($link_src, $headers);

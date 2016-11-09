@@ -8,24 +8,42 @@
  * новый клиент, подключаясь, имеет указатель на хвост буфера и мы выдаем ему сколько он попросит, пока не подавится
  * ^_^ KAWAIIIII
  * профит: моментальный старт последующих клиентов, оптимизация по памяти, упразднение метода adjustBuffer, ...?
+
+ * переработка класса, делаем поддержку всех клиентов даже для одного фильма:
+ *	для режима isLive=0 пусть буфер будет неразделяемым. на стороне клиента
+ *		все равно никогда не будет двух клиентов с одинаковым offset
+ *		хотя это придется еще клиента дорабатывать. хочется все же ограничиться правкой StreamUnit
+ *	точнее буфер может вообще отсутствовать, все что считаем из источника - сразу пишем на соотв.клиента
+ *		если в него что то не поместилось (несколько сот кБ) - сохраняем в его мини буфер
  */
 
 class StreamUnit {
-	const BUF_READ = 256000; // bytes
-	const BUF_MIN = 20000;
+	/* на примере ТВ потока: если буфер сильно большой - AceServer очень часто уходит в
+	 * буферизацию, т.е. бОльшую часть времени находится в этом состоянии,
+	 * т.к. прогруженные данные при большом буфере мы забираем очень быстро, а битрейт
+	 * ТВ канала небольшой.
+	 */
+	const BUF_READ = 25000; // bytes
+	const BUF_MIN = 25;
 	const BUF_MAX = 512000;
 	const BUF_SECONDS = 30;
 	const BUF_DELTA_PRC = 5;
 	const RESTART_COUNT = 30;
 	const BUFFER_LENGTH = 15e6;
-	const INIT_LENGTH = 2e6; // 2mb
+	// устарело. у разных каналов разный битрейт. HD каналы еще есть
+	// так что даем фору по времени. 5 сек, см. INIT_SECONDS
+	// если держать 2Мб отставания от ace - он не будет переходить в режим буферизации
+	// если пытаться держаться ближе (читать все до отказа) - часто буферизует
+	const INIT_LENGTH = 2.0e6;
+	const INIT_SECONDS = 4;
 
 	const STATE_STARTING = 0x01; // самое начало, когда только-только вызван метод start
 	const STATE_STARTED = 0x02; // поток пошел
 	const STATE_IDLE = 0x09;
 
 	protected $buffer = ''; // сюда большой строкой будет записываться буфер
-	protected $isLive = false;
+	protected $isLive = true;
+	protected $streamType; // тип потока (plugin code)
 	
 	protected $bufferSize;
 	protected $buf_adjusted = array();
@@ -35,6 +53,7 @@ class StreamUnit {
 
 	protected $clients = array();
 	protected $startTime; // время запроса потока
+	protected $startedTime; // время, когда получена ссылка на поток (пробуферизованный)
 	protected $waitSec; // сколько секунд ждать ссылки на поток
 	protected $finished = false; // выставляется в true когда отключается последний клиент
 	protected $stopReading = false;
@@ -49,6 +68,7 @@ class StreamUnit {
 		// ace-related code! TODO
 		// в принципе все эти ace-параметры можно и к другим источникам применить
 		$this->statistics = array(
+			'dl_total' => 0, // сколько байт вообще было прочитано из источника за все время
 			'bufpercent' => null,
 			'acestate' => null,
 			'speed_dn' => null,
@@ -86,6 +106,14 @@ class StreamUnit {
 
 	public function __destruct() {
 		# error_log(' destruct stream ' . spl_object_hash ($this));
+	}
+
+	// первый компонент request_uri, т.е. плагин (torrent, ttv, websocket, etc)
+	// достать его здесь - не совсем просто, т.к. это содержится в ClientRequest
+	// делаем так, при регистрации в потоке первого клиента, берем его lastRequest,
+	// и спрашиваем у него тип
+	public function getType() {
+		return $this->streamType;
 	}
 
 	public function close() {
@@ -128,12 +156,19 @@ class StreamUnit {
 		return $this->statistics;
 	}
 
+	// текущий объем данных в разделяемом буфере
 	public function getBufferedLength() {
 		return strlen($this->buffer);
 	}
 
+	// размер порции данных, читаемых из источника за раз
 	public function getBufferSize() {
 		return $this->bufferSize;
+	}
+
+	// максимальный объем разделяемого буфера
+	public function getBufferLength() {
+		return self::BUFFER_LENGTH;
 	}
 
 	public function getState() {
@@ -179,6 +214,9 @@ class StreamUnit {
 			#$state = 'unk';
 		}
 		return $state;
+	}
+	public function isLive() {
+		return $this->isLive;
 	}
 
 	public function getName() {
@@ -229,6 +267,11 @@ class StreamUnit {
 		else if ($this->state == self::STATE_STARTING and !empty($stats['started'])) {
 			$this->state = self::STATE_STARTED;
 			$this->isLive = $this->cur_conn->isLive();
+			$this->startedTime = time();
+			foreach ($this->getClients() as $c) {
+				// перевыставляем режим ecoMode, см.коммент к методу registerClient
+				$c->setEcoMode($this->isLive);
+			}
 			#error_log('Event: stream resource ready, isLive=' . ($this->isLive ? 'true' : 'false'));
 		}
 
@@ -243,24 +286,61 @@ class StreamUnit {
 	}
 
 	// TODO рефаккттоориииить
+	// TODO еще косяк.. касается долгооткрывающегося ace контента.
+	//	флаг isLive в момент регистрации клиента мб определен неверно,
+	//	т.к. регистрация происходит раньше, чем поток открывается и
+	//	отчитывается событием 'headers'
 	public function registerClient(StreamClient $client) {
+		// это тут немного не к месту. просто нужен тип открываемого потока
+		// файл, торрент, вебсокет, тв и т.д.
+		if (!$this->streamType) {
+			$req = $client->getLastRequest();
+			$this->streamType = $req->getPluginCode();
+		}
+
 		if (!$this->isLive) { // типа кино
 			// предыдущих клиентов надо скинуть, иначе новый диапазон байт будет при
 			// прочтении записан на них тоже. надо только на последнего подключившегося
 			// может это логичнее при openStream делать?
-			# error_log('Drop all clients except new one');
+			// error_log('Drop all clients except new one');
+			// если клиенту не отправлялись заголовки Connection: close, он вполне
+			// может возыметь наглось отправить еще запрос по тому же каналу
+			// и этот запрос будет обработан как и предыдущий. и приведет нас сюда
+			// и в случае, если это кино (isLive=false), то все клиенты будут сброшены
+			// включая последнего, и это косяк. см.ниже про getLastRequest()
 			foreach ($this->getClients() as $peer => $one) {
-				$this->dropClientByPeer($peer);
+				// поэтому дополнительно проверяем peer
+				if ($peer == $client->getName()) {
+					// сделаем unregister, чтобы далее register нормально отработал
+					$this->unregisterClientByName($peer);
+					error_log(' unregister ' . $peer . ' instead of kick');
+				} else {
+					$this->dropClientByPeer($peer);
+				}
 			}
+			// на случай если поток уже был запущен и последний клиент отключился,
+			// идет обратный отсчет до полной остановки. и тут подключается новый
+			// клиент - надо отменить остановку
 			$this->unfinish();
 			$this->buffer = '';
+			$this->statistics['dl_total'] = 0;
 		}
+
+		// для режима кино обязательно вырубаем ecoMode, иначе просто не будет работать
+		// т.к. для работы перемотки плееры делают несколько мелких запросов, а ecoMode
+		// из-за этого отдает данные по 1 байту
+		// см. коммент к методу про косяк с isLive
+		$client->setEcoMode($this->isLive);
 
 		$peer = $client->getName();
 		$this->clients[$peer] = $client;
 		$client->associateStream($this);
-		$headers = $this->cur_conn->getStreamHeaders(true);
 
+
+
+
+		// что идет ниже - мне не нравится
+		// заголовки должны быть с правильным range и content-length
 		if ($this->isLive) {
 			// если поток уже открыт и воспроизводится, то похоже это дополнительные клиенты
 			// надо им отослать заголовки! а то внезапно оказалось, что более 1 клиента на одну
@@ -268,6 +348,7 @@ class StreamUnit {
 			// для Live-режима заголовки те же самые, одинаковые для всех
 			// для просмотра торрентов отдельная песня. там разные Range: bytes должны быть
 			if ($this->isRunning()) {
+				$headers = $this->cur_conn->getStreamHeaders(true);
 				// попробуем решить проблему отвала VLC по negative counter таким способом:
 				// нового клиента цепляем на середину буфера
 				list($pointerPos, $pointer) = $this->getMiddlePointerPosition();
@@ -278,10 +359,6 @@ class StreamUnit {
 		}
 
 		// далее идет логика для режима Кино (не лайв поток)
-		// для режима кино обязательно вырубаем ecoMode, иначе просто не будет работать
-		// т.к. для работы перемотки плееры делают несколько мелких запросов, а ecoMode
-		// из-за этого отдает данные по 1 байту
-		$client->setEcoMode(false);
 		// сбросим метку начала старта, чтобы не кикнуло раньше времени
 		$this->startTime = time();
 		// итак, если у нас не поток (кино), то нужно закрыть источник 
@@ -297,14 +374,17 @@ class StreamUnit {
 		// upd: снова косяк. теперь кино глючит. первый коннект получает хедеры,
 		// затем идет следующий коннект с новым range, но хедеры еще не обновились (поток не переоткрылся)
 		// и клиент тут принимается со старыми заголовками..
-
+		// upd: другой косяк. WMPlayer имеет наглость иногда отправлять через один сокет 2 GET запроса.
+		//	и если это кино, то при обработке второго запроса кикаются все клиенты (см.выше),
+		//	в т.ч. и сам клиент от второго запроса, т.к. он тот же, что и для первого.
+		//	last_request в клиенте очищается и получаем тут при обращении req->isRanged() фатал!
 		$req = $client->getLastRequest();
-		// TODO хотелось бы все же, чтобы у каждого клиента был определен минимум 1 запрос, 
+		// DONE хотелось бы все же, чтобы у каждого клиента был определен минимум 1 запрос, 
 		// с которым он пришел. иначе нефига ему в этом методе делать
 		if ($req->isRanged()) {
 			$range = $req->getReqRange();
 			$this->cur_conn->seek($range['from']);
-			error_log('Seek to ' . $range['from']);
+			// error_log('Seek to ' . $range['from']);
 		}
 
 		$headers = $this->cur_conn->getStreamHeaders(true);
@@ -351,7 +431,7 @@ class StreamUnit {
 			if ($secPassed > $this->waitSec) {
 				// может close+exception заменить одним методом, например error(msg)
 				$this->close();
-				throw new CoreException('Failed to start stream');
+				throw new CoreException('Failed to start stream', 0);
 			}
 			// return;
 		}
@@ -363,8 +443,13 @@ class StreamUnit {
 
 		$data = null;
 		// если режим остановки и буфер похудел - продолжаем чтение
-		if ($this->stopReading) {
-			if ($this->getBufferedLength() <= self::BUFFER_LENGTH) {
+		// TODO эту фигню надо рефакторить и тестировать! глючит
+		// и для лайв-режима неактуальна совершенно
+		// КОСЯК: проблема была в том, что ТВ поток стопорился внезапно,
+		//	и ace-статистика по нему не обновлялась, т.к. не дергался aceconn::readsocket(),
+		//	т.к. не вызывался getStreamChunk(), т.к. был режим остановки чтения!
+		if (!$this->isLive and $this->stopReading) {
+			if ($this->getBufferedLength() <= $this->getBufferLength()) {
 				$this->stopReading = false;
 			}
 		}
@@ -376,13 +461,13 @@ class StreamUnit {
 		// тут собирается некоторая статистика и флаги для вывода в UI
 		$this->adjustBuffer($data);
 		// добавляем считанные данные к буферу
-		// если считанных данных нет. а до этого была частичная запись, то в буфере остается кусок, 
+		// если считанных данных нет. а до этого была частичная запись, то в буфере остается кусок,
 		// который пишется бесконечно, пока не будут прочитаны данные из потока - косяк
 		$this->appendBuffer($data);
 
 		// TODO
 		// если данные пусты, надо выдавать по несколько байт из последнего элемента буфера,
-		// чтобы XBMC дал нормально остановить при желании поток. 
+		// чтобы XBMC дал нормально остановить при желании поток.
 		// а то он пока байта не прочитает будет висеть (или до таймаута своего)
 
 		$this->statistics = array_merge($this->statistics, $this->buf_adjusted);
@@ -390,18 +475,24 @@ class StreamUnit {
 		// походу тут и проблема. эта строка писалась для старта потока
 		// однако она же сработает и при окончании потока от Ace
 		// и записывать на клиент по 1 байтику не даст
-		// upd: емое,я с указателем перепутал, закэшированные данные в размере 
+		// upd: емое,я с указателем перепутал, закэшированные данные в размере
 		// могут только вырасти, с 0 до 15-30Мб
-		if ($this->isLive and $this->getBufferedLength() < self::INIT_LENGTH) { // подкопим немного для начала
+		$gotLinkTime = (time() - $this->startedTime);
+		if (
+			$this->isLive and
+			($gotLinkTime < self::INIT_SECONDS or
+			$this->getBufferedLength() < self::INIT_LENGTH)
+		) { // подкопим немного для начала
 			return; // // убрал до ввода доп.флага различия старта и финиша
 		}
 
 		// на каждого клиента есть указатель на буфер
 		// буфер потока один на всех клиентов
 		// при старте потока пишем все в буфер, держим его размер постоянным
-		$bufSize = $this->isLive ? $this->getBufferSize() : strlen($this->buffer);
 		foreach ($this->clients as $peer => $client) {
-			$result = $client->put($this->buffer, $bufSize);
+			// на клиента всегда пытаемся писать все, что есть, т.к. максимальными кусками
+			$result = $client->put($this->buffer, self::BUF_MAX);
+			// TODO это что, такой метод определения eof?
 			if ($this->isFinished() and $client->getPointerPosition() == 100) {
 				$this->dropClientByPeer($peer);
 			}
@@ -415,6 +506,7 @@ class StreamUnit {
 	protected function appendBuffer($data) {
 		if ($data) {
 			$this->buffer .= $data;
+			$this->statistics['dl_total'] += strlen($data);
 		}
 	}
 
@@ -423,12 +515,15 @@ class StreamUnit {
 	// кикать зазевавшихся или мертвых клиентов (upd: клиент сам себя кикнет)
 	protected function trimBuffer() {
 		$len = $this->getBufferedLength();
-		$delta = $len - self::BUFFER_LENGTH;
+		$delta = $len - $this->getBufferLength();
 		if ($delta > 0) {
 			$this->buffer = substr($this->buffer, $delta);
 		}
 		// а если delta 0 или вдруг < 0?
 		$tmp = true;
+		// если хоть один клиент уже приближается к концу буфера, надо бы его пополнить
+		// т.е. прочитать еще кусок из источника. а если не переставать читать, то
+		// клиентов кикнет по достижении начала буфера. типа они отстали от остальных
 		foreach ($this->clients as $peer => $client) {
 			if ($client->getPointerPosition() > 80) {
 				$tmp = false;
@@ -453,7 +548,7 @@ class StreamUnit {
 
 		// хочется добиться равномерного считывания потока и записи на клиент
 		// причем с учетом, что у потоков мб разный битрейт
-		// если данные не получены, значит вычитали весь буфер источника 
+		// если данные не получены, значит вычитали весь буфер источника
 		// (при нормальной работе, факапы в расчет не берем сейчас)
 		// значит прекращаем повышать размер буфера для потока
 		// иначе повышаем его постепенно (на 100-1000 байт при каждом пустом $data)
@@ -483,7 +578,7 @@ class StreamUnit {
 		}
 
 		$check = (
-			empty($this->buf_adjusted['lastcheck']) or 
+			empty($this->buf_adjusted['lastcheck']) or
 			time() - $this->buf_adjusted['lastcheck'] >= 1
 		);
 
@@ -529,6 +624,43 @@ class StreamUnit {
 		}
 		// HACK нафиг всю эту подстройку буфера
 		$adaptiveBuffer or $this->bufferSize = self::BUF_READ;
+
+		if (!isset($this->statistics['speed_dn'])) {
+			return $this->bufferSize;
+		}
+		// такая мысля. смотрим скорость загрузки и выставляем буфер относительно нее
+		// чтобы не обогнать наполнение буфера ace своим жадным чтением из него, ибо
+		// это провоцирует его уходить в глухой режим буферизации
+		// но вот засада - скорость указана в секунду,
+		// а мы читаем данные из источника неизвестно сколько раз за секунду, так что
+		// даже установление нужного размера буфера не поможет просто так.
+		// нужно ограничить чтение данных этим объемом за секунду
+		// а еще у нас есть данные по объему скачанных ace данных
+		// если отслеживать кол-во прочитанного, то с оглядкой на ту цифру можно
+		// и буфер выставить
+
+		// пока данных мало - используем простое определение буфера по скорости
+		// имеет смысл только для isLive
+		$dl_bytes = $this->statistics['dl_bytes'];
+		$dl_total = $this->statistics['dl_total'];
+		// когда кино скачалось, скорость падает до 0 и размер буфера вместе с ней
+		$dlspeed = $this->statistics['speed_dn'] ? $this->statistics['speed_dn'] : 1;
+		// скорость - кбайт/с, буфер - байт, 0.9 - коэфф-т
+		$dl_bytes2 = $dl_bytes - self::INIT_LENGTH; // пытаемся отставать ровно на N Мб
+		$coeff2 = ($dl_bytes2 - $dl_total) / self::INIT_LENGTH; // пытаемся отставать ровно на N Мб
+		// коэф-т надо немного ослабить, а то слишком быстро нагоняет разницу
+		// делим на 2
+		$this->bufferSize = round($coeff2 * 1024 * $dlspeed / 3);
+
+		if ($this->bufferSize > self::BUF_MAX) {
+			$this->bufferSize = self::BUF_MAX;
+		}
+		else if ($this->bufferSize < self::BUF_MIN) {
+			$this->bufferSize = self::BUF_MIN;
+		}
+
+		#error_log(sprintf("%.1f\tAce dlb: %d\twe got: %d\tBufSize: %d",
+		#	$coeff2, $dl_bytes, $dl_total, $this->bufferSize));
 	}
 
 }

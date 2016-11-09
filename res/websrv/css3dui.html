@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title><?=$TPLDATA['title']?></title>
+		<meta charset="utf-8">
+
+		<link href="https://fonts.googleapis.com/css?family=Audiowide|El+Messiri|Jura|Open+Sans+Condensed:300|Play&amp;subset=cyrillic" rel="stylesheet">
+
+		<style>
+			body, html { background-color: #000; color: #000; font-size: 1.1em;
+				font-family: Jura, arial, sans-serif; cursor: default; margin: 0;
+				overflow: hidden; }
+			canvas { width: 100%; height: 100%; }
+
+			#maincontent { height: 100%; width: 100%; border: 0px solid red; }
+			#maincontent .bg { position: absolute; font-size: 2.8em; white-space: nowrap;
+				opacity: 0.3; top: 30%; left: 0; font-family: audiowide; }
+			#maincontent h1 { background-color: #ccc; color: transparent; text-shadow: -1px 1px 1px rgba(20,20,20,0.7);
+				-webkit-background-clip: text; -moz-background-clip: text; background-clip: text; }
+
+			div#bodybg { width: 100%; height: 100%; display: block; position: fixed; top: 0;
+				-webkit-filter: blur(10px); }
+			div#bodybg::after { content: ""; background: url('/websrv/img/nebula.jpg') no-repeat; opacity: 0.9;
+				top: 0; left: -20%; bottom: 0; right: 0; position: absolute; z-index: -1; background-size: cover; }
+
+			#error { color: #f22; position: fixed; top: 50%; left: 30%; }
+
+			#streams { margin-left: 220px; }
+
+			#stats { position: absolute; border: 0px dashed #922; padding: 10px 20px;
+				height: auto; top: 0; left: 0; width: 200px; bottom: 0; }
+			#stats ul { list-style: none; padding: 0px; margin: 0px; font-weight: bold; }
+			#stats [data-content="uptime"],
+			#stats [data-content="uptime_h"] { font-size: 2.3em; text-align: right;
+				text-shadow: 0px 0px 10px #000; }
+			#stats .uptime { text-align: center; }
+
+			#stats .logcontainer { position: absolute; border: 0px dashed #292;
+				margin: 30px 10px 10px 10px; height: auto; top: 200px; left: 0; bottom: 0;
+				overflow: hidden; right: 0; font-size: 0.7em; font-family: open sans condensed; }
+			.logcontainer .logline { display: block; white-space: nowrap;
+				overflow: hidden; text-overflow: ellipsis; }
+
+			.container { margin: 5px auto; }
+
+			.app__stream { padding: 10px 25px; position: relative; border: 0px solid #ccc;
+				margin: 5px 0px; min-height: 45px; }
+			.app__stream::after { content: ""; opacity: 1.0;
+				top: 0; left: 0; bottom: 0; right: 0; position: absolute; z-index: -1; }
+			.app__stream [data-content="title"] { font-size: 1.3em; color: rgba(200,200,0,1);
+				text-shadow: 1px 2px 5px #000; display: block; white-space: nowrap;
+				font-family: open sans condensed; }
+			.app__stream [data-content="buffer"] { font-size: 0.8em; display: block; }
+			.app__stream [data-islive] { font-size: 0.5em; display: none; position: absolute;
+				right: 0; margin-top: -22px; letter-spacing: 0.4em; padding: 1px 0px 1px 4px;
+				color: #fff; font-weight: bold; text-shadow: 1px 1px 2px #f55;
+				box-shadow: 0px 0px 3px 1px rgba(200, 0, 0, 0.4); background-color: rgba(255, 0,0, 0.7); }
+			[data-started="true"] [data-islive="true"] { display: block; }
+
+			.app__stream [ui-element="progressbar"] { display: block; height: 2px; border: 0px solid #070;
+				max-width: 600px; position: relative; margin: 3px 0px; background-color: #333;
+				box-shadow: 0px 0px 5px 0px rgba(200, 0, 0, 0.3); }
+			.app__stream [ui-element="progressbar"] .bar,
+			.app__stream [ui-element="progressbar"] .bar2 { display: block; content:"";
+				height: 2px; width: 5%; opacity: 0.7; position: absolute; margin-top: -0px; }
+			.app__stream [ui-element="progressbar"] .bar { background-color: #ff0;
+				box-shadow: 0px 0px 7px 0px #ff0; }
+			.app__stream [ui-element="progressbar"] .bar2 { background-color: #c00; }
+
+			[ui-element="statistics-acestate"] { display: block; position: absolute; top: 5px;
+				right: 0; text-align: right; color: #ddd; letter-spacing: 7px; width: 100%;
+				line-height: 1.8em; font-family: verdana; font-size: 0.6em;
+				text-shadow: 1px 1px 3px #000; }
+			[data-content="bufpercent"]::after { content: "%"; }
+			[ui-element="statistics-acestate"] [data-acestate] { display: none; text-align: center; }
+			[data-acestate="close"] [data-acestate="close"],
+			[data-acestate="dl"] [data-acestate="dl"],
+			[data-acestate="buf"] [data-acestate="buf"],
+			[data-acestate="start"] [data-acestate="start"],
+			[data-acestate="prebuf"] [data-acestate="prebuf"] { display: inline-block; }
+
+			[data-acestate="dl"] i { display: block; position: absolute; top: 0px;
+				left: 0px; font-style: normal; }
+
+
+			.app__clients { margin-top: -6px; border: 0px solid #ccc;
+				overflow: hidden; padding-top: 33px; }
+			.app__clients::before { display: block; height: 5px; margin-top: -10px;
+				border: 0px solid red; content: ""; }
+			.app__stream__client { position: relative; min-height: 17px; border: 0px solid red;
+				font-size: 0.8em; text-shadow: 1px 1px 1px #ccc; color: #000; }
+			.app__stream__client div { position: absolute; left: 0px; padding-left: 10px; }
+			.app__stream__client div::before { position: absolute; border-left: 1px solid rgba(150,150,150,1);
+				border-bottom: 1px solid rgba(150,150,150,1); width: 6px; height: 6000px; content: " ";
+				display: block; left: 0px; bottom: 7px; mix-blend-mode: difference; }
+			.app__stream__client [data-content="peer"] { padding-left: 18px; }
+			.app__stream__client [data-content="traffic"],
+			.app__stream__client [data-content="uptime"] { display: none; }
+			.app__stream:hover [data-content="traffic"],
+			.app__stream:hover [data-content="uptime"] { display: initial; }
+			.app__stream:hover [data-content="peer"] { display: none; }
+			.app__stream__client [data-content="traffic"]::after { content:" •••"; }
+
+			.app__stream__client [data-clienttype] { background: url() left center no-repeat; }
+			.app__stream__client [data-clienttype="vlc"] { background-image: url('/websrv/img/vlc.ico'); }
+			.app__stream__client [data-clienttype="kodi"] { background-image: url('/websrv/img/kodi.png'); }
+			.app__stream__client [data-clienttype="xbmc"] { background-image: url('/websrv/img/xbmc.png'); }
+			.app__stream__client [data-clienttype="wmp"] { background-image: url('/websrv/img/wmp.png'); }
+
+
+			.element.active {
+				background-color: rgba(100,200,100,0.7) !important;
+				animation: blinker 0.5s linear infinite;
+			}
+			@keyframes blinker {
+			  50% { opacity: 0.4; }
+			}
+			#examples, #disconnected { display: none; }
+
+			/* state-based styles */
+			body[data-wwwok="0"] #stats [data-content="uptime"],
+			body[data-wwwok="0"] #stats [data-content="uptime_h"] { color: #000; text-shadow: 0px 0px 5px #f00; }
+			body[data-connected="0"] { color: #666; }
+			body[data-connected="0"] #stats,
+			body[data-connected="0"] .container { display: none; }
+			body[data-connected="0"] #disconnected { display: block; color: #f22; position: fixed; top: 40%; left: 30%; 
+				animation: blinker 0.5s linear infinite; }
+		</style>
+	</head>
+
+	<body data-wwwok="" ipport="<?=$TPLDATA['ipport']?>" data-connected="0">
+
+		<div id="examples">
+			<div class="app__stream" data-streamid="" data-started="false">
+				<span data-content="title">&nbsp;</span>
+				<!--span data-content="buffer"></span-->
+				<span ui-element="progressbar">
+					<span data-islive="">LIVE</span>
+					<span ui-element="statistics-acestate" data-acestate="">
+						<span data-acestate="start">starting</span>
+						<span data-acestate="close">stopping</span>
+						<span data-acestate="dl">playing <i data-content="bufLenMb"></i></span>
+						<span data-acestate="buf">buffering
+							<span data-content="bufpercent"></span>
+						</span>
+						<span data-acestate="prebuf">prebuffering
+							<span data-content="bufpercent"></span>
+						</span>
+					</span>
+					<span class="bar"></span>
+					<span class="bar2"></span>
+				</span>
+				<!--span data-content="state" class="play"></span-->
+				<div class="app__clients"></div>
+			</div>
+			<div class="app__stream__client" data-peer=""
+				data-isEcoMode="" data-isEcoModeRunning="">
+				<div>
+					<span data-content="peer" data-clienttype=""></span>
+					<span data-content="traffic"></span>
+					<span data-content="uptime"></span>
+				</div>
+			</div>
+			<span class="logline"></span>
+		</div>
+
+		<div id="maincontent">
+
+			<div id="error"></div>
+			<div id="disconnected">disconnected</div>
+
+			<div class="bg"><h1 data-content="maintitle"></h1></div>
+
+			<div id="stats">
+				<ul>
+					<li class="uptime">up and ready time <span data-content="uptime_h"></span></li>
+					<li>Used RAM: <span data-content="memory"></span>Mb</li>
+					<li>Listen on port <span data-content="port"></span></li>
+				</ul>
+
+				<div class="logcontainer">
+				</div>
+			</div>
+
+			<div id="streams">
+				<div class="container" data-filter-type="ttv">
+				</div>
+
+				<div class="container" data-filter-type="torrent">
+				</div>
+			</div>
+		</div>
+
+		<div id="bodybg"></div>
+
+<!--
+UI делится на 2 вертикальных половины, делящие место в отношении 1:3
+25% - колонка статистики, 75% - колонка списка трансляций.
+Меньшая половина отображается под углом.
+При клике на меньшую половину соотношение меняется на обратное:
+логи становятся шире, чтобы их можно было почитать, а также появляются
+доп. контролы (настройки, запуск контента и т.д.).
+
+гора WebGL примеров http://stemkoski.github.io/Three.js/
+
+-->
+
+
+		<script src="/websrv/js/jquery-1.11.3.js"></script>
+		<script src="/websrv/js/three.min.js"></script>
+		<script src="/websrv/js/tween.min.js"></script>
+		<script src="/websrv/js/TrackballControls.js"></script>
+		<script src="/websrv/js/CSS3DRenderer.js"></script>
+		<script src="/websrv/js/css3d.js"></script>
+
+		<script src="/websrv/js/socket.js"></script>
+	</body>
+</html>

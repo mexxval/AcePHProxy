@@ -12,6 +12,7 @@ class StreamClient {
 	protected $finished = false; // выставляется в true когда отключается клиент
 	protected $err_counter;
 	protected $ecoModeEnabled = true;
+	protected $ecoModeRunning = false;
 	protected $pointer = 0; // указатель на буфер
 	protected $pointerPos = 0; // позиция указателя в буфере, %. Т.е. фактически сколько буфера уже ушло на клиент
 	protected $tsconnected; // когда подключился
@@ -25,7 +26,7 @@ class StreamClient {
 		stream_set_blocking($this->socket, 0);
 		stream_set_timeout($this->socket, 0, 20000);
 		$this->tsconnected = time();
-		# error_log('construct client ' . spl_object_hash ($this));
+		// error_log('construct client ' . spl_object_hash ($this) . "\t" . $peer);
 	}
 
 	public function registerEventListener($cb) {
@@ -75,6 +76,39 @@ class StreamClient {
 		}
 		return sprintf('%d %s', $bytes, $units);
 	}
+	// возвращает известные типы клиентов. например название плеера, браузера
+	public function getType() {
+		$req = $this->getLastRequest();
+		// коннект уже может быть, но оформленного реквеста может не быть
+		if (!$req) {
+			return false;
+		}
+
+		$ua = $req->getUserAgent();
+		$map = array(
+			'chrome' => 'chrome',
+			'vlc' => 'vlc',
+			'kodi' => 'kodi',
+			'xbmc' => 'xbmc',
+			'wmp' => array('wmfsdk', 'Windows-Media-Player'),
+		);
+		$pattern = array();
+		foreach ($map as $name => $subptrn) {
+			is_array($subptrn) or $subptrn = array($subptrn);
+			$pattern[] = sprintf('(?<%s>(%s))', $name, implode('|', $subptrn));
+		}
+		$pattern = '~(' . implode('|', $pattern) . ')~sUi';
+
+		if (!preg_match($pattern, $ua, $m)) {
+			return false;
+		}
+		$res = array_filter(array_intersect_key($m, $map), 'strlen');
+		if (!$res) {
+			return false;
+		}
+		reset($res);
+		return key($res);
+	}
 
 	public function isFinished() {
 		return $this->finished;
@@ -83,12 +117,24 @@ class StreamClient {
 		return $this->stream and $this->stream->isActive();
 	}
 	public function setEcoMode($bool) {
+		//error_log('Setting eco mode to ' . ($bool ? 'TRUE' : 'false'));
 		$this->ecoModeEnabled = (bool) $bool;
+	}
+	// включена ли функция экорежима вообще
+	public function isEcoMode() {
+		return $this->ecoModeEnabled;
+	}
+	// задействована ли функция экорежима в данный момент (буфер опустел?)
+	public function isEcoModeRunning() {
+		return $this->ecoModeRunning;
 	}
 
 	// вызывается при регистрации клиента в потоке, они связываются перекрестными ссылками друг на друга
 	public function associateStream(StreamUnit $stream) {
 		$this->stream = $stream;
+		// новая связка - возможно новая регистрация того же клиента
+		// значит будет новый вызов accept()
+		$this->isAccepted = false;
 	}
 
 
@@ -119,19 +165,6 @@ class StreamClient {
 		if (!$this->socket) {
 			throw new Exception('inactive client socket', 10);
 		}
-		// Типафича. если буфер Null, пишем всю data, полезно при записи заголовков на клиент
-		$writeWhole = is_null($bufSize);
-		$dataLen = strlen($data);
-		// решение "выдавать по одному" было проблемой для отправки хедеров из accept()
-
-		$correctPointer = true;
-		if ($writeWhole) {
-			$bufSize = $dataLen;
-			$correctPointer = false;
-			//	error_log('put on client ' . $data);
-		}
-		// сразу обновим указатель в %
-		$this->pointerPos = $dataLen ? round($this->pointer / $dataLen * 100) : 0; // и его позиции в %
 
 		// пробуем использовать stream_select()
 		// а проблема в том, что XBMC набрал себе буфера секунд 5-8, и больше не лезет, 
@@ -165,6 +198,12 @@ class StreamClient {
 		// вот еще по ошибке 11
 		// http://stackoverflow.com/questions/14370489/what-can-cause-a-resource-temporarily-unavailable-on-sock-send-command
 
+		// Типафича. если буфер Null, пишем всю data, полезно при записи заголовков на клиент
+		$writeWhole = is_null($bufSize);
+		// $data это большой общий разделяемый буфер. передается сюда по ссылке
+		$dataLen = strlen($data);
+		// решение "выдавать по одному" было проблемой для отправки хедеров из accept()
+
 		// XBMC при попытке остановить поток во время Ace-буферизации вис до окончания буферизации
 		// причина была в том, что весь буфер был уже записан, и флаг ecoMode по сути не работал
 		// put был пуст и мы выходили из метода
@@ -176,17 +215,42 @@ class StreamClient {
 		// upd: чтобы это работало, нужно подкорректировать bufSize, чтобы тот не вылез за пределы dataLen
 		// например: в этот проход разница данные-указатель > 50000, а bufSize = 256000, 
 		// и в след.проход на клиента пишутся остатки буфера и ничего для ecoMode не остается
-		$ecoModeTailLength = 50000;
-		$ecoMode = false;
+		$ecoModeTailLength = 1000;
+
+		$correctPointer = true;
+		if ($writeWhole) {
+			$bufSize = $dataLen;
+			$correctPointer = false;
+			//	error_log('put on client ' . $data);
+		} else {
+			// иначе проверим, сколько осталось до конца буфера
+			// надо оставить хвост для выдачи по 1 байту
+			// например для ТВ потока при буфере 512к и остатке данных 510к
+			// ecoMode включится очень рано, задолго до заданных 1кБ
+			// нужно подрезать буфер
+			// отличный эффект, клиенты держатся чуть не на последнем байте,
+			// стабильность улучшена (xbmc не буферизует)
+			if (
+				($this->pointer + $bufSize) > $dataLen and
+				($this->pointer + $ecoModeTailLength) < $dataLen // защита от ухода в минус
+			) {
+				$bufSize = $dataLen - $this->pointer - $ecoModeTailLength;
+				// error_log('buffer trimmed to ' . $bufSize);
+			}
+		}
+
 		// ecoMode представляет проблему для режима просмотра фильма,
 		// но очень и очень полезен для режима ТВ:
 		// дает стабильность и XBMC быстрее отрабатывает остановку потока
-		if ($this->ecoModeEnabled and !$writeWhole and ($this->pointer + $bufSize) > ($dataLen + $ecoModeTailLength)) {
-			$ecoMode = true;
-		}
-		if ($ecoMode) {
+		$this->ecoModeRunning = ($this->isEcoMode() and !$writeWhole and
+			($this->pointer + $bufSize) > $dataLen);
+		if ($this->ecoModeRunning) {
 			$bufSize = 1;
 		}
+
+
+		// сразу обновим указатель в %
+		$this->pointerPos = $dataLen ? round($this->pointer / $dataLen * 100) : 0; // и его позиции в %
 
 		$put = substr($data, $this->pointer, $bufSize);
 		if (!$put) {
@@ -264,7 +328,7 @@ class StreamClient {
 		// TODO тут надо читать HTTP запрос целиком, до тех пор, пока не встретится пустая строка
 		// таймаут? хз, может клиент сам отвалится если что.. ну или вводить тут конечный автомат
 		// если клиент начал что-то похожее на GET / передавать, 
-		// значит чиатем заголовки и ждем пустой строки
+		// значит читаем заголовки и ждем пустой строки
 
 		// хоть логика разбора клиентского запроса и лежит в ClientRequest, но все же
 		// мы явно работаем по HTTP, что означает несколько вещей:
@@ -389,11 +453,12 @@ class StreamClient {
 		}
 		is_resource($this->socket) and fclose($this->socket);
 		$this->finished = true;
-		// error_log('client closed');
+		$this->notifyListener(array('event' => 'close'));
+		// error_log('  client closed');
 	}
 
 	public function __destruct() {
-		#error_log(' destruct client ' . spl_object_hash ($this));
+	//	error_log(' destruct client ' . spl_object_hash ($this) . "\t" . $this->getName());
 	}
 }
 

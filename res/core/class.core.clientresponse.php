@@ -12,10 +12,15 @@ class ClientResponse {
 		$this->req = $req;
 		$this->contents = $contents;
 		$this->streamid = $streamid;
-		// error_log(' construct response ' . spl_object_hash ($this));
+		# error_log(' construct response ' . spl_object_hash ($this));
 	}
 
+	public function getPluginCode() {
+		return $this->req->getPluginCode();
+	}
 	public function getName() {
+		// return $this->req->getName(); // это не катит никак
+		return $this->getStreamId();
 	}
 	public function isStream() {
 		return (bool) $this->getStreamId();

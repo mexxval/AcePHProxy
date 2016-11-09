@@ -229,5 +229,64 @@ class AppUI_NCurses extends AppUI_common {
 		ncurses_mvwaddstr($w, $y, $x, $str);
 		$color and ncurses_wcolor_set($w, self::CLR_DEFAULT);
 	}
+
+	private function makePlainStreamsArray($allStreams) {
+		// задача - собрать массив трансляций для вывода в UI
+		$channels = array();
+		foreach ($allStreams as $pid => $one) {
+			$stats = $one->getStatistics();
+			$isRest = $one->isRestarting();
+			$bufColor = self::CLR_GREEN;
+			$titleColor = self::CLR_DEFAULT;
+			if ($isRest) {
+				$bufColor = self::CLR_SPEC1;
+				$titleColor = self::CLR_ERROR;
+			}
+			else if (@$stats['emptydata']) {
+				$bufColor = self::CLR_ERROR;
+			}
+			else if (@$stats['shortdata']) {
+				$bufColor = self::CLR_YELLOW;
+			}
+
+			$bufLen = round($one->getBufferedLength() / 1024 / 1024) . ' Mb';
+			// показываем поочередно размер буфера чтения и размер прочитанного внутреннего буфера
+			$buf = time() % 2 ? $one->getBufferSize() : $bufLen;
+			$s = iconv('cp866', 'utf8', chr(249)); // значок заполнитель
+			$tmp = array(
+				// если вместо строки массив: 0 - цвет, 1 - выводимая строка
+				0 => array(0 => $titleColor, 1 => $one->getName()),
+				1 => array(0 => $bufColor, 1 => $buf),
+				2 => $one->getState(),
+				3 => @$stats['peers'],
+				4 => sprintf('%\'.-7d%\'.6d', @$stats['ul_bytes']/1024/1024, @$stats['dl_bytes']/1024/1024),
+				6 => sprintf('%\'.-6d%\'.6d', @$stats['speed_dn'],  @$stats['speed_up'])
+			);
+			$peers = $one->getPeers();
+			if (empty($peers)) {
+				$tmp[2] = 'close';
+				$channels[] = $tmp;
+			}
+			else {
+				foreach ($peers as $peer => $client) {
+					$peercolor = self::CLR_DEFAULT;
+					if ($client->isEcoMode()) { // если экорежим на клиенте разрешен
+						$peercolor = $client->isEcoModeRunning() ? self::CLR_ERROR : self::CLR_GREEN;
+					}
+					// выводим поочередно то клиента, то его статистику
+					// это поле размером 24 символа
+					$peerline = round(time() / 0.6) % 2 ?
+						sprintf('%s %d%%', $client->getName(), $client->getPointerPosition()) :
+						sprintf('%-13s %8s', $client->getUptime(), $client->getTraffic()) ;
+					$tmp[5] = array(0 => $peercolor, 1 => $peerline);
+					$channels[] = $tmp;
+					$tmp = array(0 => '', '', '', '', '', '', '');
+				}
+			}
+		}
+
+		return $channels;
+	}
+
 }
 

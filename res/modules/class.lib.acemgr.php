@@ -45,7 +45,15 @@ class AceConnect {
 		# stream_set_blocking($conn, 0); // с этим херня полная
 		stream_set_timeout($conn, 1, 0); // нужно ли
 		$conn = new AceConn($conn, $pid, $this);
-		$res = $conn->auth($key);
+		try {
+			$res = $conn->auth($key);
+		} catch (CoreException $e) {
+			if ($e->getCode() == CoreException::EXC_CONN_FAIL) {
+				// acestream hellobg not answered
+				$this->restartAceServer();
+			}
+			throw $e;
+		}
 		return $conn;
 	}
 
@@ -58,12 +66,16 @@ class AceConnect {
 		return;
 	}
 
+	public function restartAceServer() {
+		$cmd = 'killall acestreamengine';
+		return `$cmd`;
+	}
 
 
 
 	// TODO сильно рефакторить
 	public function startraw($pid, $fileidx = 0) {
-		$conn = $this->getConnection($pid);
+		$conn = $this->getConnection($pid . $fileidx);
 		if (!$conn->isAuthorized()) {
 			throw new Exception('Ace connection not authorized');
 		}
@@ -86,12 +98,12 @@ class AceConnect {
 		return $conn;
 	}
 
-	public function starttorrent($url) {
-		$conn = $this->getConnection($url);
+	public function starttorrent($url, $fileidx = 0) {
+		$conn = $this->getConnection($url . $fileidx);
 		if (!$conn->isAuthorized()) {
 			throw new Exception('Ace connection not authorized');
 		}
-		$conn->starttorrent($url);
+		$conn->starttorrent($url, $fileidx);
 		return $conn;
 	}
 

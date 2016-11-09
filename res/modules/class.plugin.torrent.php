@@ -27,15 +27,16 @@ class AcePlugin_torrent extends AcePlugin_common {
 			return $req->response(
 				'HTTP/1.1 200 OK' . "\r\n" .
 				'Content-Length: 14324133' . "\r\n" . // TODO хедеры от балды, поправить
+				'Connection: close' . "\r\n" .
 				'Accept-Ranges: bytes' . "\r\n\r\n"
 			);
 		}
 
 		// определяем уникальный идентификатор контента
-		$pid = $req->getPid();
-		$name = $req->getName(); // для мультиторрента это индекс видеофайла
+		$pid = $req->getType();
+		$fileidx = (int) $req->getPid(); // для мультиторрента это индекс видеофайла
 
-		if (strpos($req->getType(), 'playlist') === 0) {
+		if (substr($req->getUri(), -4) == '.m3u') {
 			$playlist = $this->playlist($req);
 			$response = 'HTTP/1.1 200 OK' . "\r\n" .
 				'Connection: close' . "\r\n" .
@@ -47,11 +48,18 @@ class AcePlugin_torrent extends AcePlugin_common {
 		}
 
 		$streamid = $pid;
-		if (is_numeric($name)) { // для многосерийных торрентов видимо. name содержит номер видеофайла
-			$streamid .= $name;
+		// для многосерийных торрентов. торрент-файл один, но разные серии надо показывать как разные потоки
+		if (is_numeric($fileidx)) {
+			$streamid .= $fileidx; // а вот фиг.
+			// попытка быстро переключиться на другую серию приводит к уже известной проблеме -
+			// отсутствию данных из-за открытия одного и того же контента 2 раза, неважно,
+			// что коннекты к AceStream при этом разные, и даже что ссылка START http выдается -
+			// данных в ней нет!
+			// все-таки не фиг: потоки (объекты StreamUnit) должны быть разные, а вышеописанная
+			// проблема была из-за того, что коннект к Ace был один. подмешал к id коннекта еще и fileidx
 		}
 
-		$conn = $this->ace->startraw($pid, $name); // TODO refactor, it is NOT name for series
+		$conn = $this->ace->startraw($pid, $fileidx); // TODO refactor, it is NOT name for series
 		$conn->setRequestHeaders($req->getHeaders());
 		return $req->response($conn, $streamid);
 	}
@@ -60,18 +68,22 @@ class AcePlugin_torrent extends AcePlugin_common {
 	private function playlist($req) {
 		$playlist = array();
 
-		$curFile = $req->getPid();
-		if (substr($curFile, -12) !== '.torrent.m3u') { // интересуют только торренты
-			$curFile = null;
-		} else {
+		$curFile = $req->getType();
+		// вторым параметром в ссылке может быть либо playlist.m3u либо мультифайловый торрент
+		// во втором случае откусываем имя торрент файла и выдаем его содержание как плейлист
+		if (substr($curFile, -12) == '.torrent.m3u') {
 			// xbmc не воспринимает содержимое как плейлист без расширения m3u
 			// может еще удастся поиграть и настроить через хедеры или mime
 			$curFile = substr($curFile, 0, -4);
+		} else {
+			// иначе плейлист формируем из списка торрент-файлов в корне basedir
+			$curFile = null;
 		}
 
 		$basedir = $this->basedir;
 		$hostport = $req->getHttpHost(true); // true - с портом через двоеточие, если тот есть
 		$lib_loaded = class_exists('BDecode');
+		
 		// это запрос на чтение содержимого торрент-файла
 		if ($lib_loaded and is_file($path = ($basedir . $curFile))) {
 			$torrent = new BDecode($path);
@@ -80,7 +92,7 @@ class AcePlugin_torrent extends AcePlugin_common {
 				$name = implode('/', $one['path']);
 				// TODO hostname брать из запроса
 				$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-					'http://' . $hostport . '/torrent/multi/' . $curFile . '/' . $idx . "\r\n";
+					'http://' . $hostport . '/torrent/' . $curFile . '/' . $idx . "\r\n";
 			}
 		} else {
 			$torList = glob($basedir . '*.torrent');
@@ -113,10 +125,10 @@ class AcePlugin_torrent extends AcePlugin_common {
 				// принимаем решение, запускать файл или выдавать как плейлист
 				if ($isMultifiled) {
 					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-						'http://' . $hostport . '/torrent/playlist/' . $basename . '.m3u' . "\r\n";
+						'http://' . $hostport . '/torrent/' . $basename . '.m3u' . "\r\n";
 				} else {
 					$playlist[$name] = '#EXTINF:-1,' . $name . "\r\n" .
-						'http://' . $hostport . '/torrent/single/' . $basename . "\r\n";
+						'http://' . $hostport . '/torrent/' . $basename . "\r\n";
 				}
 			}
 		}

@@ -46,7 +46,7 @@ class StreamsManager {
 				$streamid = $response->getStreamId();
 				// если трансляции нет, создаем экземпляр
 				if (!$this->isExists($streamid)) {
-					$this->app->log('Start new stream ' . $response->getName());
+					$this->app->log(sprintf('Start new %s-stream ', $response->getPluginCode()));
 					// просим плагин запустить поток. вся логика ace, file, torrent, web, soap - на стороне плагинов
 					// но создавать самостоятельно новые потоки плагин не может. надо тут проверить, не запущен ли уже такой streamid
 					$this->streams[$streamid] = new StreamUnit($response->getStreamResource());
@@ -68,7 +68,8 @@ class StreamsManager {
 				$this->streams[$streamid]->registerClient($client);
 				// на клиента ничего не пишем, ответные заголовки будут потом
 			} else {
-				$client->put($response->getContents());
+				$respContents = $response->getContents();
+				$client->put($respContents);
 				$client->close();
 			}
 		}

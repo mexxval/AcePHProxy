@@ -2,6 +2,7 @@
 
 class CoreException extends Exception {
     const EXC_404_PLUGIN = 0x01;
+    const EXC_CONN_FAIL = 0x02;
 
 	private $addinfo = null;
 

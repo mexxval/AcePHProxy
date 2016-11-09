@@ -39,7 +39,7 @@ class AcePlugin_ttv extends AcePlugin_common {
 				}
 				catch (Exception $e) {
 					// рефакторить на нормальные классы, коды ошибок и убрать копипаст parse4PID!!
-					error_log($e->getMessage());
+					// error_log($e->getMessage());
 					if (stripos($e->getMessage(), 'curl') === 0) {
 						throw new Exception('Torrent tv timed out');
 					}

@@ -9,7 +9,7 @@ class ClientRequest {
 
 
 	public function __construct($data, $client) {
-		//error_log('client send: ' . $data);
+		// error_log('client send: ' . "\n\t" . str_replace("\n", "\n\t", $data));
 		$this->req = $data;
 		$this->client = $client;
 		$this->start = $this->parse($this->req);
@@ -45,6 +45,9 @@ class ClientRequest {
 	public function getUri() {
 		return $this->start['reqUri'];
 	}
+	public function getUserAgent() {
+		return $this->start['UA'];
+	}
 	// GET POST HEAD OPTIONS SUBSCRIBE etc
 	public function getReqType() {
 		return $this->start['reqType'];
@@ -59,8 +62,19 @@ class ClientRequest {
 	public function getReqRange() {
 		return $this->start['range'];
 	}
-	public function getHttpHost($withPort = true) { // TODO withPort=false
-		return $this->start['reqHost'];
+	public function getHttpHost($withPort = true) {
+		$host = $this->start['reqHost'];
+		if (!$withPort) {
+			$host = explode(':', $host);
+			$host = reset($host);
+		}
+		return $host;
+	}
+	// на какой интерфейс пришло обращение
+	// (заголовки можно и подделать, но как определить на сервере не нашел)
+	// кстати там может быть как dns-имя, так и ip
+	public function getServerHost() {
+		return $this->getHttpHost(false);
 	}
 
 	public function addData() {
@@ -83,10 +97,10 @@ class ClientRequest {
 			'reqType' => substr($firstLine, 0, $space = strpos($firstLine, ' ')), // от начала до первого пробела (GET/HEAD/etc)
 			'reqUri' => substr($firstLine, $space + 1, ($rspace = strrpos($firstLine, ' ')) - $space - 1), // /ttv/trid/123/title
 			'reqProto' => substr($firstLine, $rspace + 1),	// HTTP/1.x
-			'range' => preg_match('~Range: bytes=(\d+)-(\d+)?~sm', $sock_data, $m) ? 
+			'range' => preg_match('~Range: bytes=(\d+)-(\d+)?~sm', $sock_data, $m) ?
 				array('from' => $m[1], 'to' => @$m[2]) : null,
-			'reqHost' => preg_match('~host: ([^\s]*)~smi', $sock_data, $m) ? 
-				$m[1] : null,
+			'reqHost' => preg_match('~host: ([^\s]*)~smi', $sock_data, $m) ? $m[1] : null,
+			'UA' => preg_match('~user-agent: ([^\n]+)~smi', $sock_data, $m) ? $m[1] : null,
 			'reqContent' => empty($content[1]) ? null : $content[1] // тело запроса (для POST)
 		);
 
@@ -94,14 +108,15 @@ class ClientRequest {
 		// обычно запрос состоит из 3 частей: тип, адрес и название. /pid/blablabla/name
 		// UPD: теперь запрос состоит из указателя на плагин, типа контента, id и названия
 		//	/ttv/trid/390/2x2
+		//  /torrent/seriesname_s01.torrent/2/Episode name
 		$uriInfo = array();
 		$uri = $result['reqUri'];
 		$tmp = explode('/', $uri);
 		// @ расставлены, чтобы кривые урлы в лог ошибки не генерили
-		$uriInfo['plugin'] = @$tmp[1]; // между первым и вторым слешами
-		$uriInfo['uriType'] = @$tmp[2]; // между вторым и третьим слешами
-		$uriInfo['uriAddr'] = urldecode(@$tmp[3]); // decode, торрент файл может содержать спецсимволы ([ ] пробелы и т.д.)
-		// название торрента - необязательный параметр. скоро через LOADASYNC получать будем
+		$uriInfo['plugin'] = @$tmp[1];		// getPluginCode() между первым и вторым слешами
+		$uriInfo['uriType'] = urldecode(@$tmp[2]); // getType() между вторым и третьим слешами
+		$uriInfo['uriAddr'] = urldecode(@$tmp[3]); // getPid() decode, торрент файл может содержать спецсимволы ([ ] пробелы и т.д.)
+		// getName() название торрента - необязательный параметр. скоро через LOADASYNC получать будем
 		$uriInfo['uriName'] = isset($tmp[4]) ? urldecode($tmp[4]) : '';
 
 		// types:
@@ -117,7 +132,7 @@ class ClientRequest {
 		return $result + $uriInfo;
 	}
 	public function __destruct() {
-		# error_log(' destruct request ' . spl_object_hash ($this));
+		 // error_log(' destruct request ' . spl_object_hash ($this));
 	}
 }
 
